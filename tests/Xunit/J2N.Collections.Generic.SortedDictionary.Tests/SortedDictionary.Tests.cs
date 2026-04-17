@@ -159,6 +159,21 @@ namespace J2N.Collections.Tests
                 Assert.Equal(array[i++], obj);
         }
 
+        // J2N: Added to test descending dictionary CopyTo method
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void ICollection_NonGeneric_CopyTo_GetViewDescending_WithIndex_PreservesReverseOrder(int count)
+        {
+            SortedDictionary<string, string> collection = (SortedDictionary<string, string>)NonGenericICollectionFactory(count);
+            ICollection descendingCollection = collection.GetViewDescending();
+            SCG.KeyValuePair<string, string>[] array = new SCG.KeyValuePair<string, string>[count];
+            object[] objarray = new object[count];
+            descendingCollection.CopyTo(array, 0);
+            descendingCollection.CopyTo(objarray, 0);
+            for (int i = 0; i < count; i++)
+                Assert.Equal(array[i], (SCG.KeyValuePair<string, string>)(objarray[i]));
+        }
+
         #endregion
     }
 
@@ -182,6 +197,136 @@ namespace J2N.Collections.Tests
             Assert.False(dictionary.TryAdd("a", "c"));
             Assert.True(dictionary.TryGetValue("a", out string value));
             Assert.Equal("b", value);
+        }
+
+        [Fact]
+        public void SortedDictionary_Generic_GetView_FirstLast()
+        {
+            SortedDictionary<int, int> dictionary = new()
+            {
+                [1] = 100,
+                [3] = 300,
+                [5] = 500,
+                [7] = 700,
+                [9] = 900,
+            };
+            SortedDictionary<int, int> view = dictionary.GetView(4, 8);
+
+            Assert.True(dictionary.ContainsKey(1));
+            Assert.True(dictionary.ContainsKey(3));
+            Assert.True(dictionary.ContainsKey(5));
+            Assert.True(dictionary.ContainsKey(7));
+            Assert.True(dictionary.ContainsKey(9));
+
+            Assert.False(view.ContainsKey(1));
+            Assert.False(view.ContainsKey(3));
+            Assert.True(view.ContainsKey(5));
+            Assert.True(view.ContainsKey(7));
+            Assert.False(view.ContainsKey(9));
+
+            Assert.True(dictionary.TryGetFirst(out int key, out int value));
+            Assert.Equal(1, key);
+            Assert.Equal(100, value);
+
+            Assert.True(dictionary.TryGetLast(out key, out value));
+            Assert.Equal(9, key);
+            Assert.Equal(900, value);
+
+            Assert.True(view.TryGetFirst(out key, out value));
+            Assert.Equal(5, key);
+            Assert.Equal(500, value);
+
+            Assert.True(view.TryGetLast(out key, out value));
+            Assert.Equal(7, key);
+            Assert.Equal(700, value);
+
+            Assert.True(dictionary.RemoveFirst(out key, out value));
+            Assert.Equal(1, key);
+            Assert.Equal(100, value);
+            
+            Assert.True(dictionary.TryGetFirst(out key, out value));
+            Assert.Equal(3, key);
+            Assert.Equal(300, value);
+
+            Assert.True(view.TryGetFirst(out key, out value));
+            Assert.Equal(5, key);
+            Assert.Equal(500, value);
+
+            Assert.True(view.RemoveFirst(out key, out value));
+            Assert.Equal(5, key);
+            Assert.Equal(500, value);
+
+            Assert.True(view.TryGetFirst(out key, out value));
+            Assert.Equal(7, key);
+            Assert.Equal(700, value);
+
+            Assert.True(dictionary.RemoveLast(out key, out value));
+            Assert.Equal(9, key);
+            Assert.Equal(900, value);
+            Assert.True(dictionary.TryGetLast(out key, out value));
+            Assert.Equal(7, key);
+            Assert.Equal(700, value);
+            Assert.True(view.TryGetLast(out key, out value));
+            Assert.Equal(7, key);
+            Assert.Equal(700, value);
+
+            Assert.True(view.RemoveLast(out key, out value));
+            Assert.Equal(7, key);
+            Assert.Equal(700, value);
+            Assert.Equal(0, view.Count);
+            Assert.False(view.TryGetFirst(out key, out value));
+            Assert.Equal(0, key);
+            Assert.Equal(0, value);
+            Assert.False(view.TryGetLast(out key, out value));
+            Assert.Equal(0, key);
+            Assert.Equal(0, value);
+            Assert.False(view.RemoveFirst(out key, out value));
+            Assert.Equal(0, key);
+            Assert.Equal(0, value);
+            Assert.False(view.RemoveLast(out key, out value));
+            Assert.Equal(0, key);
+            Assert.Equal(0, value);
+
+            Assert.Equal(1, dictionary.Count);
+            Assert.True(dictionary.ContainsKey(3));
+        }
+
+        // J2N: Added First and Last properties to replace Min and Max
+        [Fact]
+        public void SortedDictionary_Generic_GetView_FirstLast_Exhaustive()
+        {
+            SortedDictionary<int, int> dictionary = new()
+            {
+                [7] = 700,
+                [11] = 1100,
+                [3] = 300,
+                [1] = 100,
+                [5] = 500,
+                [9] = 900,
+                [13] = 1300,
+            };
+            for (int i = 0; i < 14; i++)
+            {
+                for (int j = i; j < 14; j++)
+                {
+                    SortedDictionary<int, int> view = dictionary.GetView(i, j);
+
+                    if (j < i || (j == i && i % 2 == 0))
+                    {
+                        Assert.False(view.TryGetFirst(out _, out _));
+                        Assert.False(view.TryGetLast(out _, out _));
+                    }
+                    else
+                    {
+                        Assert.True(view.TryGetFirst(out int key, out int value));
+                        Assert.Equal(i + ((i + 1) % 2), key);
+                        Assert.Equal((i + ((i + 1) % 2)) * 100, value);
+                        Assert.True(view.TryGetLast(out key, out value));
+                        Assert.Equal(j - ((j + 1) % 2), key);
+                        Assert.Equal((j - ((j + 1) % 2)) * 100, value);
+                    }
+                }
+            }
         }
 
 #if FEATURE_SERIALIZABLE
@@ -243,5 +388,6 @@ namespace J2N.Collections.Tests
             Assert.True(comparer.Equals(dict.Comparer));
         }
 #endif
+
     }
 }

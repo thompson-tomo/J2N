@@ -10,12 +10,13 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
-using System.Globalization;
 using System.Runtime.CompilerServices;
 
 #if FEATURE_SERIALIZABLE
 using System.Runtime.Serialization;
 #endif
+
+using SCG = System.Collections.Generic;
 
 namespace J2N.Collections.Generic
 {
@@ -143,7 +144,7 @@ namespace J2N.Collections.Generic
 #endif
     [DebuggerTypeProxy(typeof(ICollectionDebugView<>))]
     [DebuggerDisplay("Count = {Count}")]
-    public partial class SortedSet<T> : ISet<T>, ICollection<T>, ICollection,
+    public partial class SortedSet<T> : ISet<T>, ICollection<T>, ICollection, INavigableCollection<T>,
 #if FEATURE_IREADONLYCOLLECTIONS
         IReadOnlyCollection<T>,
 #endif
@@ -161,6 +162,14 @@ namespace J2N.Collections.Generic
         private IComparer<T> comparer = default!;
         private int count;
         private int version;
+
+        // J2N: Added caching fields for Min/Max
+
+        private T? cachedMin;
+        private T? cachedMax;
+
+        private int minVersion = -1;
+        private int maxVersion = -1;
 
 #if FEATURE_SERIALIZABLE
         private const string ComparerName = "Comparer"; // Do not rename (binary serialization)
@@ -247,7 +256,7 @@ namespace J2N.Collections.Generic
             // These are explicit type checks in the mold of HashSet. It would have worked better with
             // something like an ISorted<T> interface. (We could make this work for SortedList.Keys, etc.)
             SortedSet<T>? sortedSet = collection as SortedSet<T>;
-            if (sortedSet != null && !(sortedSet is TreeSubSet) && HasEqualComparer(sortedSet))
+            if (sortedSet != null && !(sortedSet is TreeSubSet) && ComparerEquals(Comparer, sortedSet.Comparer))
             {
                 if (sortedSet.Count > 0)
                 {
@@ -255,6 +264,15 @@ namespace J2N.Collections.Generic
                     this.count = sortedSet.count;
                     root = sortedSet.root!.DeepClone(this.count);
                 }
+                return;
+            }
+
+            if (TryGetSortedItems(collection, out T[]? sortedItems, out int sortedCount))
+            {
+                // We have a sorted array of items with no duplicates.
+                EnsureTreeOrder(sortedItems, sortedCount); // J2N: ensure the order matches the underlying tree if we have a reverse view
+                root = ConstructRootFromSortedArray(sortedItems!, 0, sortedCount - 1, null);
+                this.count = sortedCount;
                 return;
             }
 
@@ -321,11 +339,12 @@ namespace J2N.Collections.Generic
 
         private void RemoveAllElements(IEnumerable<T> collection)
         {
-            T? min = Min;
-            T? max = Max;
+            T? first = MinInternal;
+            T? last = MaxInternal;
+            IComparer<T> comparer = Comparer; // J2N: Use the outer comparer to ensure we do the correct range checks for reverse views, etc.
             foreach (T item in collection)
             {
-                if (!(comparer.Compare(item!, min!) < 0 || comparer.Compare(item!, max!) > 0) && Contains(item))
+                if (!(comparer.Compare(item!, first!) < 0 || comparer.Compare(item!, last!) > 0) && Contains(item))
                 {
                     Remove(item);
                 }
@@ -459,7 +478,9 @@ namespace J2N.Collections.Generic
         /// <para/>
         /// Retrieving the value of this property is an <c>O(1)</c> operation.
         /// </remarks>
-        public IComparer<T> Comparer
+        public IComparer<T> Comparer => ComparerInternal;
+
+        internal virtual IComparer<T> ComparerInternal
         {
             get
             {
@@ -486,6 +507,9 @@ namespace J2N.Collections.Generic
 
         #region Properties for Alternate Lookup
 
+        // J2N: Indicates whether the current view is reversed
+        internal virtual bool IsReversed => false;
+
         // This calls the correct layer to get the *outermost* comparer (a user comparer or a comparer wrapper around a BCL StringComparer)
         internal IComparer<T> RawComparer => comparer;
 
@@ -504,6 +528,73 @@ namespace J2N.Collections.Generic
         #endregion
 
         #region Subclass helpers
+
+        /// <summary>
+        /// Indicates the physical lowest value regardless of whether the view is reversed.
+        /// This aligns with the structure of the underlying tree.
+        /// </summary>
+        internal virtual T? LowerValue
+        {
+            get
+            {
+                // J2N: Added caching to the value so we don't have to traverse the tree again unless the set is mutated.
+                if (minVersion == version)
+                    return cachedMin;
+
+                if (root == null)
+                {
+                    cachedMin = default;
+                }
+                else
+                {
+                    Node current = root;
+                    while (current.Left != null)
+                    {
+                        current = current.Left;
+                    }
+
+                    cachedMin = current.Item;
+                }
+
+                minVersion = version;
+                return cachedMin;
+            }
+        }
+
+        /// <summary>
+        /// Indicates the physical highest value regardless of whether the view is reversed.
+        /// This aligns with the structure of the underlying tree.
+        /// </summary>
+        internal virtual T? UpperValue
+        {
+            get
+            {
+                // J2N: Added caching to the value so we don't have to traverse the tree again unless the set is mutated.
+                if (maxVersion == version)
+                    return cachedMax;
+
+                if (root == null)
+                {
+                    cachedMax = default;
+                }
+                else
+                {
+                    Node current = root;
+                    while (current.Right != null)
+                    {
+                        current = current.Right;
+                    }
+
+                    cachedMax = current.Item;
+                }
+
+                maxVersion = version;
+                return cachedMax;
+            }
+        }
+
+        // Virtual function for TreeSubSet, which may need to reverse an array order to match the underlying tree forward order.
+        internal virtual void EnsureTreeOrder(T[] array, int length) { /* Intentionally empty */ }
 
         // Virtual function for TreeSubSet, which may need to update its count.
         internal virtual void VersionCheck(bool updateCount = false) { }
@@ -553,15 +644,15 @@ namespace J2N.Collections.Generic
         /// <para/>
         /// Usage Note: This corresponds to the <c>lower()</c> method in the JDK.
         /// </remarks>
-        public bool TryGetPredecessor(T item, [MaybeNullWhen(false)] out T result) => DoTryGetPredecessor(item, out result);
+        public bool TryGetPredecessor([AllowNull] T item, [MaybeNullWhen(false)] out T result) => DoTryGetPredecessor(item, out result);
 
-        internal virtual bool DoTryGetPredecessor(T item, [MaybeNullWhen(false)] out T result)
+        internal virtual bool DoTryGetPredecessor([AllowNull] T item, [MaybeNullWhen(false)] out T result)
         {
             Node? current = root, match = null;
 
             while (current != null)
             {
-                int comp = comparer.Compare(item, current.Item);
+                int comp = comparer.Compare(item!, current.Item);
 
                 if (comp > 0)
                 {
@@ -607,15 +698,15 @@ namespace J2N.Collections.Generic
         /// <para/>
         /// Usage Note: This corresponds to the <c>higher()</c> method in the JDK.
         /// </remarks>
-        public bool TryGetSuccessor(T item, [MaybeNullWhen(false)] out T result) => DoTryGetSuccessor(item, out result);
+        public bool TryGetSuccessor([AllowNull] T item, [MaybeNullWhen(false)] out T result) => DoTryGetSuccessor(item, out result);
 
-        internal virtual bool DoTryGetSuccessor(T item, [MaybeNullWhen(false)] out T result)
+        internal virtual bool DoTryGetSuccessor([AllowNull] T item, [MaybeNullWhen(false)] out T result)
         {
             Node? current = root, match = null;
 
             while (current != null)
             {
-                int comp = comparer.Compare(item, current.Item);
+                int comp = comparer.Compare(item!, current.Item);
 
                 if (comp < 0)
                 {
@@ -661,16 +752,16 @@ namespace J2N.Collections.Generic
         /// <para/>
         /// Usage Note: This corresponds to the <c>floor()</c> method in the JDK.
         /// </remarks>
-        public bool TryGetFloor(T item, [MaybeNullWhen(false)] out T result) => DoTryGetFloor(item, out result);
+        public bool TryGetFloor([AllowNull] T item, [MaybeNullWhen(false)] out T result) => DoTryGetFloor(item, out result);
 
-        internal virtual bool DoTryGetFloor(T item, [MaybeNullWhen(false)] out T result)
+        internal virtual bool DoTryGetFloor([AllowNull] T item, [MaybeNullWhen(false)] out T result)
         {
             Node? current = root;
             Node? candidate = null;
 
             while (current != null)
             {
-                int cmp = comparer.Compare(item, current.Item);
+                int cmp = comparer.Compare(item!, current.Item);
 
                 if (cmp < 0)
                 {
@@ -708,16 +799,16 @@ namespace J2N.Collections.Generic
         /// <para/>
         /// Usage Note: This corresponds to the <c>ceiling()</c> method in the JDK.
         /// </remarks>
-        public bool TryGetCeiling(T item, [MaybeNullWhen(false)] out T result) => DoTryGetCeiling(item, out result);
+        public bool TryGetCeiling([AllowNull] T item, [MaybeNullWhen(false)] out T result) => DoTryGetCeiling(item, out result);
 
-        internal virtual bool DoTryGetCeiling(T item, [MaybeNullWhen(false)] out T result)
+        internal virtual bool DoTryGetCeiling([AllowNull] T item, [MaybeNullWhen(false)] out T result)
         {
             Node? current = root;
             Node? candidate = null;
 
             while (current != null)
             {
-                int cmp = comparer.Compare(item, current.Item);
+                int cmp = comparer.Compare(item!, current.Item);
 
                 if (cmp > 0)
                 {
@@ -1053,18 +1144,14 @@ namespace J2N.Collections.Generic
             if (count > array.Length - index)
                 ThrowHelper.ThrowArgumentException(ExceptionResource.Arg_ArrayPlusOffTooSmall);
 
-            count += index; // Make `count` the upper bound.
+            // J2N: Ensure we always stay aligned with enumerator order
+            int end = index + count;
 
-            InOrderTreeWalk(node =>
+            using var enumerator = GetEnumerator();
+            while (index < end && enumerator.MoveNext())
             {
-                if (index >= count)
-                {
-                    return false;
-                }
-
-                array[index++] = node.Item;
-                return true;
-            });
+                array[index++] = enumerator.Current;
+            }
         }
 
         void ICollection.CopyTo(Array array, int index)
@@ -1095,11 +1182,14 @@ namespace J2N.Collections.Generic
 
                 try
                 {
-                    InOrderTreeWalk(node =>
+                    // J2N: Ensure we always stay aligned with enumerator order
+                    using (var enumerator = GetEnumerator())
                     {
-                        objects[index++] = node.Item;
-                        return true;
-                    });
+                        while (enumerator.MoveNext())
+                        {
+                            objects[index++] = enumerator.Current;
+                        }
+                    }
                 }
                 catch (ArrayTypeMismatchException)
                 {
@@ -1405,7 +1495,8 @@ namespace J2N.Collections.Generic
 
                 if (!IsWithinRange(key, cmp))
                 {
-                    ThrowHelper.ThrowArgumentOutOfRangeException(ExceptionArgument.key);
+                    //ThrowHelper.ThrowArgumentOutOfRangeException(ExceptionArgument.key);
+                    return false;
                 }
 
                 // Delegate to underlying set.
@@ -1799,6 +1890,9 @@ namespace J2N.Collections.Generic
             }
 
             private bool DoTryGetPredecessor_View(ReadOnlySpan<TAlternateSpan> item, [MaybeNullWhen(false)] out T result)
+                => Set.IsReversed ? TryGetSuccessorCore_View(item, out result) : TryGetPredecessorCore_View(item, out result);
+
+            private bool TryGetPredecessorCore_View(ReadOnlySpan<TAlternateSpan> item, [MaybeNullWhen(false)] out T result)
             {
                 SortedSet<T> set = Set;
                 ISpanAlternateComparer<TAlternateSpan, T> comparer = GetAlternateComparer();
@@ -1907,6 +2001,9 @@ namespace J2N.Collections.Generic
             }
 
             private bool DoTryGetSuccessor_View(ReadOnlySpan<TAlternateSpan> item, [MaybeNullWhen(false)] out T result)
+                => Set.IsReversed ? TryGetPredecessorCore_View(item, out result) : TryGetSuccessorCore_View(item, out result);
+
+            private bool TryGetSuccessorCore_View(ReadOnlySpan<TAlternateSpan> item, [MaybeNullWhen(false)] out T result)
             {
                 SortedSet<T> set = Set;
                 ISpanAlternateComparer<TAlternateSpan, T> comparer = GetAlternateComparer();
@@ -2007,6 +2104,9 @@ namespace J2N.Collections.Generic
             }
 
             private bool DoTryGetFloor_View(ReadOnlySpan<TAlternateSpan> item, [MaybeNullWhen(false)] out T result)
+                => Set.IsReversed ? TryGetCeilingCore_View(item, out result) : TryGetFloorCore_View(item, out result);
+
+            private bool TryGetFloorCore_View(ReadOnlySpan<TAlternateSpan> item, [MaybeNullWhen(false)] out T result)
             {
                 SortedSet<T> set = Set;
                 ISpanAlternateComparer<TAlternateSpan, T> comparer = GetAlternateComparer();
@@ -2099,6 +2199,9 @@ namespace J2N.Collections.Generic
             }
 
             private bool DoTryGetCeiling_View(ReadOnlySpan<TAlternateSpan> item, [MaybeNullWhen(false)] out T result)
+                => Set.IsReversed ? TryGetFloorCore_View(item, out result) : TryGetCeilingCore_View(item, out result);
+
+            private bool TryGetCeilingCore_View(ReadOnlySpan<TAlternateSpan> item, [MaybeNullWhen(false)] out T result)
             {
                 SortedSet<T> set = Set;
                 ISpanAlternateComparer<TAlternateSpan, T> comparer = GetAlternateComparer();
@@ -2138,129 +2241,353 @@ namespace J2N.Collections.Generic
 
             #endregion TryGetCeiling
 
-            #region GetViewBetween
+            #region GetView
 
             /// <summary>
             /// Returns a view of a subset in a <see cref="SortedSet{T}"/>.
             /// <para/>
-            /// Usage Note: In Java, the upper bound of TreeSet.subSet() is exclusive. To match the behavior, call
-            /// <see cref="GetViewBetween(ReadOnlySpan{TAlternateSpan}, bool, ReadOnlySpan{TAlternateSpan}, bool)"/>,
-            /// setting <c>lowerValueInclusive</c> to <see langword="true"/> and <c>upperValueInclusive</c> to <see langword="false"/>.
+            /// Usage Note: In Java, the <paramref name="toItem"/> of TreeSet.subSet() is exclusive. To match the behavior, call
+            /// <see cref="GetView(ReadOnlySpan{TAlternateSpan}, bool, ReadOnlySpan{TAlternateSpan}, bool)"/>, setting <c>fromInclusive</c> to <see langword="true"/>
+            /// and <c>toInclusive</c> to <see langword="false"/>.
             /// </summary>
-            /// <param name="lowerValue">The lowest desired value in the view.</param>
-            /// <param name="upperValue">The highest desired value in the view.</param>
+            /// <param name="fromItem">The first desired value in the view (lowest in ascending order, highest in descending order).</param>
+            /// <param name="toItem">The last desired value in the view (highest in ascending order, lowest in descending order).</param>
             /// <returns>A subset view that contains only the values in the specified range.</returns>
-            /// <exception cref="ArgumentException"><paramref name="lowerValue"/> is more than <paramref name="upperValue"/>
-            /// according to the comparer.</exception>
+            /// <exception cref="ArgumentException"><paramref name="fromItem"/> is after <paramref name="toItem"/>
+            /// in the current view order according to the comparer.</exception>
             /// <exception cref="ArgumentOutOfRangeException">A tried operation on the view was outside the range
-            /// specified by <paramref name="lowerValue"/> and <paramref name="upperValue"/>.</exception>
+            /// specified by <paramref name="fromItem"/> and <paramref name="toItem"/>.</exception>
             /// <remarks>
-            /// This method returns a view of the range of elements that fall between <paramref name="lowerValue"/> and
-            /// <paramref name="upperValue"/> (inclusive), as defined by the comparer. This method does not copy elements from the
-            /// <see cref="SortedSet{T}"/>, but provides a window into the underlying <see cref="SortedSet{T}"/> itself.
+            /// This method returns a view of the range of elements that fall between <paramref name="fromItem"/> and
+            /// <paramref name="toItem"/> (inclusive), as defined by the current view order and the comparer.
+            /// This method does not copy elements from the <see cref="SortedSet{T}"/>, but provides a window into the
+            /// underlying <see cref="SortedSet{T}"/> itself.
             /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
             /// <para/>
-            /// If this method is called on a view, it will inherit the <c>lowerValueInclusive</c> and <c>upperValueInclusive</c>
-            /// behavior of the view. To override this behavior, call the
-            /// <see cref="GetViewBetween(ReadOnlySpan{TAlternateSpan}, bool, ReadOnlySpan{TAlternateSpan}, bool)"/> overload
-            /// instead.
+            /// This corresponds to the <c>subSet()</c> method in the JDK.
             /// </remarks>
-            public SortedSet<T> GetViewBetween(ReadOnlySpan<TAlternateSpan> lowerValue, ReadOnlySpan<TAlternateSpan> upperValue)
-            {
-                SortedSet<T> set = Set;
-                SortedSet<T> underlying = set.UnderlyingSet;
-                ISpanAlternateComparer<TAlternateSpan, T> comparer = GetAlternateComparer();
-
-                if (IsTooLow(lowerValue, comparer))
-                {
-                    ThrowHelper.ThrowArgumentOutOfRangeException(ExceptionArgument.lowerValue);
-                }
-                if (IsTooHigh(upperValue, comparer))
-                {
-                    ThrowHelper.ThrowArgumentOutOfRangeException(ExceptionArgument.upperValue);
-                }
-
-                // Delegate to underlying set.
-                // All views share the same Comparer instance. Therefore, passing the alternate comparer to the other instance is also safe.
-                return _isUnderlying
-                    ? GetViewBetween(lowerValue, set.LowerBoundInclusive, upperValue, set.UpperBoundInclusive, comparer)
-                    : underlying.GetSpanAlternateLookup(_alternateComparer).GetViewBetween(lowerValue, set.LowerBoundInclusive, upperValue, set.UpperBoundInclusive, comparer);
-            }
+            public SortedSet<T> GetView(ReadOnlySpan<TAlternateSpan> fromItem, ReadOnlySpan<TAlternateSpan> toItem)
+                => DoGetView(fromItem, fromInclusive: true, ExceptionArgument.fromItem, toItem, toInclusive: true, ExceptionArgument.toItem);
 
             /// <summary>
             /// Returns a view of a subset in a <see cref="SortedSet{T}"/>.
             /// <para/>
-            /// Usage Note: To match the behavior of the JDK, call this overload with <paramref name="lowerValueInclusive"/>
-            /// set to <see langword="true"/> and <paramref name="upperValueInclusive"/> set to <see langword="false"/>.
+            /// Usage Note: To match the behavior of the JDK, call this overload with <paramref name="fromInclusive"/>
+            /// set to <see langword="true"/> and <paramref name="toInclusive"/> set to <see langword="false"/>.
             /// </summary>
-            /// <param name="lowerValue">The lowest value in the range for the view.</param>
-            /// <param name="lowerValueInclusive">If <see langword="true"/>, <paramref name="lowerValue"/> will be included in the range;
-            /// otherwise, it is an exclusive lower bound.</param>
-            /// <param name="upperValue">The highest desired value in the view.</param>
-            /// <param name="upperValueInclusive">If <see langword="true"/>, <paramref name="upperValue"/> will be included in the range;
-            /// otherwise, it is an exclusive upper bound.</param>
+            /// <param name="fromItem">The first desired value in the view (lowest in ascending order, highest in descending order).</param>
+            /// <param name="fromInclusive">If <see langword="true"/>, <paramref name="fromItem"/> will be included in the range;
+            /// otherwise, it is an exclusive bound.</param>
+            /// <param name="toItem">The last desired value in the view (highest in ascending order, lowest in descending order).</param>
+            /// <param name="toInclusive">If <see langword="true"/>, <paramref name="toItem"/> will be included in the range;
+            /// otherwise, it is an exclusive bound.</param>
             /// <returns>A subset view that contains only the values in the specified range.</returns>
-            /// <exception cref="ArgumentException"><paramref name="lowerValue"/> is more than <paramref name="upperValue"/>
-            /// according to the comparer.</exception>
+            /// <exception cref="ArgumentException"><paramref name="fromItem"/> is after <paramref name="toItem"/>
+            /// in the current view order according to the comparer.</exception>
             /// <exception cref="ArgumentOutOfRangeException">A tried operation on the view was outside the range
-            /// specified by <paramref name="lowerValue"/> and <paramref name="upperValue"/>.</exception>
+            /// specified by <paramref name="fromItem"/> and <paramref name="toItem"/>.</exception>
             /// <remarks>
-            /// This method returns a view of the range of elements that fall between <paramref name="lowerValue"/> and
-            /// <paramref name="upperValue"/>, as defined by the comparer. Each bound may either be inclusive
-            /// (<see langword="true"/>) or exclusive (<see langword="false"/>) depending on the values of <paramref name="lowerValueInclusive"/>
-            /// and <paramref name="upperValueInclusive"/>. This method does not copy elements from the
+            /// This method returns a view of the range of elements that fall between <paramref name="fromItem"/> and
+            /// <paramref name="toItem"/>, as defined by the current view order and the comparer. Each bound may either be inclusive
+            /// (<see langword="true"/>) or exclusive (<see langword="false"/>) depending on the values of <paramref name="fromInclusive"/>
+            /// and <paramref name="toInclusive"/>. This method does not copy elements from the
             /// <see cref="SortedSet{T}"/>, but provides a window into the underlying <see cref="SortedSet{T}"/> itself.
             /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
+            /// <para/>
+            /// This corresponds to the <c>subSet()</c> method in the JDK.
             /// </remarks>
-            public SortedSet<T> GetViewBetween(ReadOnlySpan<TAlternateSpan> lowerValue, bool lowerValueInclusive, ReadOnlySpan<TAlternateSpan> upperValue, bool upperValueInclusive)
+            public SortedSet<T> GetView(ReadOnlySpan<TAlternateSpan> fromItem, bool fromInclusive, ReadOnlySpan<TAlternateSpan> toItem, bool toInclusive)
+                => DoGetView(fromItem, fromInclusive, ExceptionArgument.fromItem, toItem, toInclusive, ExceptionArgument.toItem);
+
+            internal SortedSet<T> DoGetView(ReadOnlySpan<TAlternateSpan> fromItem, bool fromInclusive, ExceptionArgument fromArgumentName, ReadOnlySpan<TAlternateSpan> toItem, bool toInclusive, ExceptionArgument toArgumentName)
             {
-                SortedSet<T> set = Set;
-                SortedSet<T> underlying = set.UnderlyingSet;
                 ISpanAlternateComparer<TAlternateSpan, T> comparer = GetAlternateComparer();
 
-                if (IsTooLow(lowerValue, comparer))
-                {
-                    ThrowHelper.ThrowArgumentOutOfRangeException(ExceptionArgument.lowerValue);
-                }
-                if (IsTooHigh(upperValue, comparer))
-                {
-                    ThrowHelper.ThrowArgumentOutOfRangeException(ExceptionArgument.upperValue);
-                }
-
-                // Delegate to underlying set.
-                // All views share the same Comparer instance. Therefore, passing the alternate comparer to the other instance is also safe.
                 return _isUnderlying
-                    ? GetViewBetween(lowerValue, lowerValueInclusive, upperValue, upperValueInclusive, comparer)
-                    : underlying.GetSpanAlternateLookup(_alternateComparer).GetViewBetween(lowerValue, lowerValueInclusive, upperValue, upperValueInclusive, comparer);
+                    ? DoGetView(fromItem, fromInclusive, fromArgumentName, toItem, toInclusive, toArgumentName, comparer)
+                    : DoGetView_View(fromItem, fromInclusive, fromArgumentName, toItem, toInclusive, toArgumentName, comparer);
             }
 
-            internal SortedSet<T> GetViewBetween(ReadOnlySpan<TAlternateSpan> lowerValue, bool lowerValueInclusive, ReadOnlySpan<TAlternateSpan> upperValue, bool upperValueInclusive, ISpanAlternateComparer<TAlternateSpan, T> comparer)
+            internal SortedSet<T> DoGetView_View(ReadOnlySpan<TAlternateSpan> fromItem, bool fromInclusive, ExceptionArgument fromArgumentName, ReadOnlySpan<TAlternateSpan> toItem, bool toInclusive, ExceptionArgument toArgumentName, ISpanAlternateComparer<TAlternateSpan, T> comparer)
             {
-                SortedSet<T> underlying = Set.UnderlyingSet;
+                bool reverse = Set.IsReversed;
 
+                ReadOnlySpan<TAlternateSpan> lower = reverse ? toItem : fromItem;
+                ReadOnlySpan<TAlternateSpan> upper = reverse ? fromItem : toItem;
+                bool lowerInclusive = reverse ? toInclusive : fromInclusive;
+                bool upperInclusive = reverse ? fromInclusive : toInclusive;
+                ExceptionArgument lowerArgumentName = reverse ? toArgumentName : fromArgumentName;
+                ExceptionArgument upperArgumentName = reverse ? fromArgumentName : toArgumentName;
+
+                if (!IsWithinRange(lower, lowerInclusive, comparer))
+                {
+                    ThrowHelper.ThrowArgumentOutOfRangeException(lowerArgumentName);
+                }
+                if (!IsWithinRange(upper, upperInclusive, comparer))
+                {
+                    ThrowHelper.ThrowArgumentOutOfRangeException(upperArgumentName);
+                }
+
+                return DoGetView(lower, lowerInclusive, lowerArgumentName, upper, upperInclusive, upperArgumentName, comparer);
+            }
+
+            internal SortedSet<T> DoGetView(ReadOnlySpan<TAlternateSpan> fromItem, bool fromInclusive, ExceptionArgument fromArgumentName, ReadOnlySpan<TAlternateSpan> toItem, bool toInclusive, ExceptionArgument toArgumentName, ISpanAlternateComparer<TAlternateSpan, T> comparer)
+            {
                 // J2N: We instantiate the upper instance prior to comparing to see whether we should
                 // throw when lowerValue is greater than upperValue. This is so we don't have
                 // to change the design of the ISpanAlternateComparer interface to allow matching 2
                 // ReadOnlySpan instances. We must get two instances anyway because TreeSubSet requires
                 // them as fields, so there is no harm in doing it this way.
 
-                if (!TryGetValue(upperValue, out T? upper))
+                if (!TryGetValue(toItem, out T? to))
                 {
-                    upper = comparer.Create(upperValue);
+                    to = comparer.Create(toItem);
                 }
-                if (comparer.Compare(lowerValue, upper) > 0)
+                if (comparer.Compare(fromItem, to) > 0)
                 {
-                    ThrowHelper.ThrowArgumentException(ExceptionResource.SortedSet_LowerValueGreaterThanUpperValue, ExceptionArgument.lowerValue);
+                    ThrowHelper.ThrowArgumentException_SortedSet_LowerValueGreaterThanUpperValue(fromArgumentName, toArgumentName);
                 }
-                if (!TryGetValue(lowerValue, out T? lower))
+                if (!TryGetValue(fromItem, out T? from))
                 {
-                    lower = comparer.Create(lowerValue);
+                    from = comparer.Create(fromItem);
                 }
 
-                return new TreeSubSet(underlying, lower, lowerValueInclusive, upper, upperValueInclusive, true, true);
+                SortedSet<T> set = Set;
+                return new TreeSubSet(set.UnderlyingSet, from, fromInclusive, to, toInclusive, true, true, set.IsReversed);
             }
 
-            #endregion GetViewBetween
+            #endregion GetView
+
+            #region GetViewBefore
+
+            /// <summary>
+            /// Returns the view of a subset in a <see cref="SortedSet{T}"/> with no lower bound.
+            /// <para/>
+            /// Usage Note: To match the default behavior of the JDK, call the <see cref="GetViewBefore(ReadOnlySpan{TAlternateSpan}, bool)"/>
+            /// overload with <c>inclusive</c> set to <see langword="false"/>.
+            /// </summary>
+            /// <param name="toItem">The last desired value in the view (highest in ascending order, lowest in descending order).</param>
+            /// <returns>A subset view that contains only the values in the specified range.</returns>
+            /// <remarks>
+            /// This method returns a view of the range of elements that fall before <paramref name="toItem"/>
+            /// (inclusive), as defined by the current view order and comparer. This method does not copy elements from the
+            /// <see cref="SortedSet{T}"/>, but provides a window into the underlying <see cref="SortedSet{T}"/> itself.
+            /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
+            /// <para/>
+            /// This corresponds to the <c>headSet()</c> method in the JDK.
+            /// </remarks>
+            public SortedSet<T> GetViewBefore(ReadOnlySpan<TAlternateSpan> toItem)
+                => DoGetViewBefore(toItem, inclusive: true, ExceptionArgument.toItem);
+
+            /// <summary>
+            /// Returns the view of a subset in a <see cref="SortedSet{T}"/> with no lower bound.
+            /// <para/>
+            /// Usage Note: To match the default behavior of the JDK, call this overload with <paramref name="inclusive"/>
+            /// set to <see langword="false"/>.
+            /// </summary>
+            /// <param name="toItem">The last desired value in the view (highest in ascending order, lowest in descending order).</param>
+            /// <param name="inclusive">If <see langword="true"/>, <paramref name="toItem"/> will be included in the range;
+            /// otherwise, it is an exclusive upper bound.</param>
+            /// <returns>
+            /// This method returns a view of the range of elements that fall before <paramref name="toItem"/>, as defined
+            /// by the current view order and comparer. The upper bound may either be inclusive (<see langword="true"/>)
+            /// or exclusive (<see langword="false"/>) depending on the value of <paramref name="inclusive"/>.
+            /// This method does not copy elements from the <see cref="SortedSet{T}"/>, but provides a window into
+            /// the underlying <see cref="SortedSet{T}"/> itself.
+            /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
+            /// <para/>
+            /// This corresponds to the <c>headSet()</c> method in the JDK.
+            /// </returns>
+            public SortedSet<T> GetViewBefore(ReadOnlySpan<TAlternateSpan> toItem, bool inclusive)
+                => DoGetViewBefore(toItem, inclusive, ExceptionArgument.toItem);
+
+            internal SortedSet<T> DoGetViewBefore(ReadOnlySpan<TAlternateSpan> toItem, bool inclusive, ExceptionArgument toArgumentName)
+            {
+                ISpanAlternateComparer<TAlternateSpan, T> comparer = GetAlternateComparer();
+
+                return _isUnderlying
+                    ? DoGetViewBefore(toItem, inclusive, toArgumentName, comparer)
+                    : DoGetViewBefore_View(toItem, inclusive, toArgumentName, comparer);
+            }
+
+            internal SortedSet<T> DoGetViewBefore(ReadOnlySpan<TAlternateSpan> toItem, bool inclusive, ExceptionArgument toArgumentName, ISpanAlternateComparer<TAlternateSpan, T> comparer)
+            {
+                if (!TryGetValue(toItem, out T? upper))
+                {
+                    upper = comparer.Create(toItem);
+                }
+
+                SortedSet<T> set = Set;
+                return new TreeSubSet(set.UnderlyingSet, default, true, upper, inclusive, false, true, set.IsReversed);
+            }
+
+            internal SortedSet<T> DoGetViewBefore_View(ReadOnlySpan<TAlternateSpan> toItem, bool inclusive, ExceptionArgument toArgumentName, ISpanAlternateComparer<TAlternateSpan, T> comparer)
+            {
+                if (!IsWithinRange(toItem, inclusive, comparer))
+                {
+                    ThrowHelper.ThrowArgumentOutOfRangeException(toArgumentName);
+                }
+
+                return !Set.IsReversed
+                    ? GetViewBeforeCore_View(toItem, inclusive, comparer)
+                    : GetViewAfterCore_View(toItem, inclusive, comparer);
+            }
+
+            internal SortedSet<T> GetViewBeforeCore_View(ReadOnlySpan<TAlternateSpan> toItem, bool inclusive, ISpanAlternateComparer<TAlternateSpan, T> comparer)
+            {
+                SortedSet<T> set = Set;
+                T? upper;
+                bool upperInclusive;
+
+                // Fast path - no upper bound, no equality possible
+                if (!set.HasUpperBound)
+                {
+                    if (!TryGetValue(toItem, out upper))
+                        upper = comparer.Create(toItem);
+                    upperInclusive = inclusive;
+                }
+                else
+                {
+                    // Compute comparison ONCE
+                    int cmp = comparer.Compare(toItem, set.UpperBound!);
+
+                    if (cmp < 0)
+                    {
+                        // Override with new value
+                        if (!TryGetValue(toItem, out upper))
+                            upper = comparer.Create(toItem);
+                        upperInclusive = inclusive;
+                    }
+                    else if (cmp > 0)
+                    {
+                        // Clipped by upper bound
+                        upper = set.UpperBound;
+                        upperInclusive = set.UpperBoundInclusive;
+                    }
+                    else // cmp == 0
+                    {
+                        // Rare equality case
+                        upper = set.UpperBound;
+                        upperInclusive = set.UpperBoundInclusive && inclusive;
+                    }
+                }
+
+                return new TreeSubSet(set.UnderlyingSet, set.LowerBound, set.LowerBoundInclusive, upper, upperInclusive, set.HasLowerBound, true, set.IsReversed);
+            }
+
+            #endregion GetViewBefore
+
+            #region GetViewAfter
+
+            /// <summary>
+            /// Returns a view of a subset in a <see cref="SortedSet{T}"/> with no upper bound.
+            /// </summary>
+            /// <param name="fromItem">The first desired value in the view (lowest in ascending order, highest in descending order).</param>
+            /// <returns>A subset view that contains only the values in the specified range.</returns>
+            /// <remarks>
+            /// This method returns a view of the range of elements that fall after <paramref name="fromItem"/>
+            /// (inclusive), as defined by the current view order and comparer. This method does not copy elements from the
+            /// <see cref="SortedSet{T}"/>, but provides a window into the underlying <see cref="SortedSet{T}"/> itself.
+            /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
+            /// <para/>
+            /// This corresponds to the <c>tailSet()</c> method in the JDK.
+            /// </remarks>
+            public SortedSet<T> GetViewAfter(ReadOnlySpan<TAlternateSpan> fromItem)
+                => DoGetViewAfter(fromItem, inclusive: true, ExceptionArgument.fromItem);
+
+            /// <summary>
+            /// Returns a view of a subset in a <see cref="SortedSet{T}"/> with no upper bound.
+            /// </summary>
+            /// <param name="fromItem">The first desired value in the view (lowest in ascending order, highest in descending order).</param>
+            /// <param name="inclusive">If <see langword="true"/>, <paramref name="fromItem"/> will be included in the range;
+            /// otherwise, it is an exclusive lower bound.</param>
+            /// <returns>A subset view that contains only the values in the specified range.</returns>
+            /// <remarks>
+            /// This method returns a view of the range of elements that fall after <paramref name="fromItem"/>, as defined
+            /// by the current view order and comparer. The lower bound may either be inclusive (<see langword="true"/>)
+            /// or exclusive (<see langword="false"/>) depending on the value of <paramref name="inclusive"/>. This method
+            /// does not copy elements from the <see cref="SortedSet{T}"/>, but provides a window into the underlying
+            /// <see cref="SortedSet{T}"/> itself.
+            /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
+            /// <para/>
+            /// This corresponds to the <c>tailSet()</c> method in the JDK.
+            /// </remarks>
+            public SortedSet<T> GetViewAfter(ReadOnlySpan<TAlternateSpan> fromItem, bool inclusive)
+                => DoGetViewAfter(fromItem, inclusive, ExceptionArgument.fromItem);
+
+            internal SortedSet<T> DoGetViewAfter(ReadOnlySpan<TAlternateSpan> toItem, bool inclusive, ExceptionArgument fromArgumentName)
+            {
+                ISpanAlternateComparer<TAlternateSpan, T> comparer = GetAlternateComparer();
+
+                return _isUnderlying
+                    ? DoGetViewAfter(toItem, inclusive, fromArgumentName, comparer)
+                    : DoGetViewAfter_View(toItem, inclusive, fromArgumentName, comparer);
+            }
+
+            internal SortedSet<T> DoGetViewAfter(ReadOnlySpan<TAlternateSpan> fromItem, bool inclusive, ExceptionArgument fromArgumentName, ISpanAlternateComparer<TAlternateSpan, T> comparer)
+            {
+                if (!TryGetValue(fromItem, out T? lower))
+                {
+                    lower = comparer.Create(fromItem);
+                }
+
+                SortedSet<T> set = Set;
+                return new TreeSubSet(set.UnderlyingSet, lower, inclusive, default, true, true, false, set.IsReversed);
+            }
+
+            internal SortedSet<T> DoGetViewAfter_View(ReadOnlySpan<TAlternateSpan> fromItem, bool inclusive, ExceptionArgument fromArgumentName, ISpanAlternateComparer<TAlternateSpan, T> comparer)
+            {
+                if (!IsWithinRange(fromItem, inclusive, comparer))
+                {
+                    ThrowHelper.ThrowArgumentOutOfRangeException(fromArgumentName);
+                }
+
+                return !Set.IsReversed
+                    ? GetViewAfterCore_View(fromItem, inclusive, comparer)
+                    : GetViewBeforeCore_View(fromItem, inclusive, comparer);
+            }
+
+            internal SortedSet<T> GetViewAfterCore_View(ReadOnlySpan<TAlternateSpan> fromItem, bool inclusive, ISpanAlternateComparer<TAlternateSpan, T> comparer)
+            {
+                SortedSet<T> set = Set;
+                T? lower;
+                bool lowerInclusive;
+
+                if (!set.HasLowerBound)
+                {
+                    if (!TryGetValue(fromItem, out lower))
+                        lower = comparer.Create(fromItem);
+                    lowerInclusive = inclusive;
+                }
+                else
+                {
+                    // Compute comparison ONCE
+                    int cmp = comparer.Compare(fromItem, set.LowerBound!);
+                    if (cmp > 0)
+                    {
+                        // Override with new value
+                        if (!TryGetValue(fromItem, out lower))
+                            lower = comparer.Create(fromItem);
+                        lowerInclusive = inclusive;
+                    }
+                    else if (cmp < 0)
+                    {
+                        // Clipped by lower bound
+                        lower = set.LowerBound;
+                        lowerInclusive = set.LowerBoundInclusive;
+                    }
+                    else // cmp == 0
+                    {
+                        // Rare equality case
+                        lower = set.LowerBound;
+                        lowerInclusive = set.LowerBoundInclusive && inclusive;
+                    }
+                }
+
+                return new TreeSubSet(set.UnderlyingSet, lower, lowerInclusive, set.UpperBound, set.UpperBoundInclusive, true, set.HasUpperBound, set.IsReversed);
+            }
+
+            #endregion GetViewAfter
 
             #region FindNode
 
@@ -2318,20 +2645,48 @@ namespace J2N.Collections.Generic
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             private bool IsWithinRange(ReadOnlySpan<TAlternateSpan> item, ISpanAlternateComparer<TAlternateSpan, T> comparer)
             {
-                return !IsTooLow(item, comparer) && !IsTooHigh(item, comparer);
+                SortedSet<T> set = Set;
+
+                // Check whether too low
+                if (set.HasLowerBound)
+                {
+                    int c = comparer.Compare(item, set.LowerBound!);
+                    if (c < 0 || (c == 0 && !set.LowerBoundInclusive))
+                        return false;
+                }
+
+                // Check whether too high
+                if (set.HasUpperBound)
+                {
+                    int c = comparer.Compare(item, set.UpperBound!);
+                    if (c > 0 || (c == 0 && !set.UpperBoundInclusive))
+                        return false;
+                }
+
+                return true;
             }
 
+            private bool IsWithinRange(ReadOnlySpan<TAlternateSpan> item, bool inclusive, ISpanAlternateComparer<TAlternateSpan, T> comparer)
+                => inclusive ? IsWithinRange(item, comparer) : IsWithinClosedRange(item, comparer);
 
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            private bool IsTooLow(ReadOnlySpan<TAlternateSpan> item, ISpanAlternateComparer<TAlternateSpan, T> comparer)
+
+            private bool IsWithinClosedRange(ReadOnlySpan<TAlternateSpan> item, ISpanAlternateComparer<TAlternateSpan, T> comparer)
             {
                 SortedSet<T> set = Set;
 
-                if (!set.HasLowerBound)
-                    return false;
+                if (set.HasLowerBound)
+                {
+                    if (comparer.Compare(item!, set.LowerBound!) < 0)
+                        return false;
+                }
 
-                int c = comparer.Compare(item, set.LowerBound);
-                return c < 0 || (c == 0 && !set.LowerBoundInclusive);
+                if (set.HasUpperBound)
+                {
+                    if (comparer.Compare(item!, set.UpperBound!) > 0)
+                        return false;
+                }
+
+                return true;
             }
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -2339,11 +2694,27 @@ namespace J2N.Collections.Generic
             {
                 SortedSet<T> set = Set;
 
-                if (!set.HasUpperBound)
-                    return false;
+                if (set.HasUpperBound)
+                {
+                    int c = comparer.Compare(item!, set.UpperBound!);
+                    if (c > 0 || (c == 0 && !set.UpperBoundInclusive))
+                        return true;
+                }
+                return false;
+            }
 
-                int c = comparer.Compare(item, set.UpperBound);
-                return c > 0 || (c == 0 && !set.UpperBoundInclusive);
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            private bool IsTooLow(ReadOnlySpan<TAlternateSpan> item, ISpanAlternateComparer<TAlternateSpan, T> comparer)
+            {
+                SortedSet<T> set = Set;
+
+                if (set.HasLowerBound)
+                {
+                    int c = comparer.Compare(item, set.LowerBound!);
+                    if (c < 0 || (c == 0 && !set.LowerBoundInclusive))
+                        return true;
+                }
+                return false;
             }
 
             #endregion Bounds Checking
@@ -2365,9 +2736,9 @@ namespace J2N.Collections.Generic
         /// <para/>
         /// This method is an <c>O(log n)</c> operation.
         /// </remarks>
-        public IEnumerator<T> GetEnumerator() => new Enumerator(this);
+        public IEnumerator<T> GetEnumerator() => new Enumerator(this, IsReversed); // J2N: Pass through the IsReversed property to align the enumeration order with the view
 
-        internal Enumerator GetEnumeratorInternal() => new Enumerator(this);
+        internal Enumerator GetEnumeratorInternal(bool reverse) => new Enumerator(this, IsReversed ^ reverse);
 
         IEnumerator<T> IEnumerable<T>.GetEnumerator() => GetEnumerator();
 
@@ -2545,7 +2916,8 @@ namespace J2N.Collections.Generic
             return null;
         }
 
-        internal void UpdateVersion() => ++version;
+        // J2N: We need to override for views to ensure the underlying set version is updated
+        internal virtual void UpdateVersion() => ++version;
 
         /// <summary>
         /// Returns an <see cref="IEqualityComparer{T}"/> object that can be used to create a collection that contains individual sets.
@@ -2580,7 +2952,7 @@ namespace J2N.Collections.Generic
                 return false;
             }
 
-            if (set1.HasEqualComparer(set2))
+            if (ComparerEquals(set1.Comparer, set2.Comparer))
             {
                 return set1.Count == set2.Count && set1.SetEquals(set2);
             }
@@ -2607,14 +2979,34 @@ namespace J2N.Collections.Generic
         }
 
         /// <summary>
-        /// Determines whether two <see cref="SortedSet{T}"/> instances have the same comparer.
+        /// Determines whether two <see cref="IComparer{T}"/> instances are equal.
         /// </summary>
-        /// <param name="other">The other <see cref="SortedSet{T}"/>.</param>
-        /// <returns>A value indicating whether both sets have the same comparer.</returns>
-        private bool HasEqualComparer(SortedSet<T> other)
+        /// <param name="a">The first <see cref="IComparer{T}"/>.</param>
+        /// <param name="b">The second <see cref="IComparer{T}"/>.</param>
+        /// <returns>A value indicating whether both comparers are equal.</returns>
+        // J2N NOTE: This is equivalent to HasEqualComparer() in the BCL, but allows for comparing on any collection type.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool ComparerEquals(IComparer<T> a, IComparer<T>? b)
+            // Commonly, both comparers will be the default comparer (and reference-equal). Avoid a virtual method call to Equals() in that case.
+            => a == b || a.Equals(b);
+
+        /// <summary>
+        /// Determines whether an <see cref="IComparer{T}"/> is equivalent to an <see cref="IEqualityComparer{T}"/>.
+        /// </summary>
+        /// <param name="a">The first <see cref="IComparer{T}"/>.</param>
+        /// <param name="b">The second <see cref="IComparer{T}"/>.</param>
+        /// <returns>A value indicating whether both comparers are equal.</returns>
+        private static bool ComparerEquals(IComparer<T> a, IEqualityComparer<T>? b)
         {
             // Commonly, both comparers will be the default comparer (and reference-equal). Avoid a virtual method call to Equals() in that case.
-            return Comparer == other.Comparer || Comparer.Equals(other.Comparer);
+            if (a == b)
+                return true;
+
+            // Currently, only StringComparer instances can be compared for equivalence.
+            if (typeof(T) == typeof(string) && a is StringComparer sca && b is StringComparer scb)
+                return a.Equals(b);
+
+            return false;
         }
 
         #endregion
@@ -2627,29 +3019,64 @@ namespace J2N.Collections.Generic
         /// </summary>
         /// <param name="other">The collection to compare to the current <see cref="SortedSet{T}"/> object.</param>
         /// <exception cref="ArgumentNullException"><paramref name="other"/> is <c>null</c>.</exception>
-        /// <remarks>Any duplicate elements in <paramref name="other"/> are ignored.</remarks>
+        /// <remarks>
+        /// Any duplicate elements in <paramref name="other"/> are ignored.
+        /// <para/>
+        /// If the collection represented by <paramref name="other"/> is a <see cref="SortedSet{T}"/>,
+        /// <see cref="SCG.SortedSet{T}"/>, <see cref="IDistinctSortedCollection{T}"/>, or
+        /// <see cref="ISortedCollection{T}"/> with the same equality comparer as the current <see cref="SortedSet{T}"/> object,
+        /// this is an O(<c>n</c> + <c>m</c>) operation, where <c>n</c> is the <see cref="Count"/> of the current set
+        /// and <c>m</c> is the <see cref="SCG.ICollection{T}.Count"/> of <paramref name="other"/>. Otherwise,
+        /// this is an O(<c>m</c> log <c>n</c>) operation.
+        /// </remarks>
         public void UnionWith(IEnumerable<T> other)
         {
             if (other is null)
                 ThrowHelper.ThrowArgumentNullException(ExceptionArgument.other);
 
-            SortedSet<T>? asSorted = other as SortedSet<T>;
-            TreeSubSet? treeSubset = this as TreeSubSet;
+            // Other is already the empty set; return.
+            if (other is ICollection<T> genericCollection)
+            {
+                if (genericCollection.Count == 0)
+                    return;
+            }
+            else if (other is ICollection c)
+            {
+                if (c.Count == 0)
+                    return;
+            }
 
-            if (treeSubset != null)
+            IDistinctSortedCollection<T>? asSorted;
+            if (other is not SCG.SortedSet<T> otherSortedSet)
+                asSorted = other as IDistinctSortedCollection<T>;
+            else
+                asSorted = new BclSortedSetAdapter(otherSortedSet);
+
+            bool thisIsView = this is ICollectionView thisView && thisView.IsView;
+
+            if (thisIsView)
                 VersionCheck();
 
-            if (asSorted != null && treeSubset == null && Count == 0)
+            // If asSorted is null, this is not a distinct sorted collection.
+            if (asSorted is null && !thisIsView && other is ISortedCollection<T> otherSortedNonDistinct)
             {
-                SortedSet<T> dummy = new SortedSet<T>(asSorted, comparer);
+                UnionWithSortedNonDistinctCollection(otherSortedNonDistinct);
+                return;
+            }
+
+            if (asSorted != null && !thisIsView && Count == 0)
+            {
+                SortedSet<T> dummy = new SortedSet<T>(asSorted, UnderlyingSet.Comparer);
                 root = dummy.root;
                 count = dummy.count;
                 version++;
                 return;
             }
 
+            IComparer<T>? comparer;
+
             // This actually hurts if N is much greater than M. The / 2 is arbitrary.
-            if (asSorted != null && treeSubset == null && HasEqualComparer(asSorted) && (asSorted.Count > this.Count / 2))
+            if (asSorted != null && !thisIsView && ComparerEquals(comparer = Comparer, asSorted.Comparer) && (asSorted.Count > this.Count / 2))
             {
                 // First do a merge sort to an array.
                 T[] merged = new T[asSorted.Count + this.Count];
@@ -2659,7 +3086,7 @@ namespace J2N.Collections.Generic
                 bool mineEnded = !mine.MoveNext(), theirsEnded = !theirs.MoveNext();
                 while (!mineEnded && !theirsEnded)
                 {
-                    int comp = Comparer.Compare(mine.Current, theirs.Current);
+                    int comp = comparer.Compare(mine.Current, theirs.Current);
                     if (comp < 0)
                     {
                         merged[c++] = mine.Current;
@@ -2693,6 +3120,7 @@ namespace J2N.Collections.Generic
                 // safe to gc the root, we  have all the elements
                 root = null;
 
+                EnsureTreeOrder(merged, c); // J2N: ensure the order matches the underlying tree if we have a reverse view
                 root = ConstructRootFromSortedArray(merged, 0, c - 1, null);
                 count = c;
                 version++;
@@ -2703,7 +3131,119 @@ namespace J2N.Collections.Generic
             }
         }
 
-        private static Node? ConstructRootFromSortedArray(T[] arr, int startIndex, int endIndex, Node? redNode)
+        private void UnionWithSortedNonDistinctCollection(ISortedCollection<T> other)
+        {
+            Debug.Assert(other != null);
+
+            if (Count ==  0)
+            {
+                SortedSet<T> dummy = new SortedSet<T>(other!, UnderlyingSet.Comparer);
+                root = dummy.root;
+                count = dummy.count;
+                version++;
+                return;
+            }
+
+            IComparer<T>? comparer;
+
+            if (ComparerEquals(comparer = Comparer, other!.Comparer) && (other.Count > this.Count / 2))
+            {
+                MergeWithSortedNonDistinctCollection(other!, comparer);
+                return;
+            }
+
+            AddAllElements(other!);
+        }
+
+        private void MergeWithSortedNonDistinctCollection(ISortedCollection<T> other, IComparer<T> comparer)
+        {
+            // Preconditions already checked:
+            // - treeSubset == null
+            // - comparer equality
+            // - other.Count > this.Count / 2
+
+            T[] merged = new T[other.Count + this.Count];
+            int c = 0;
+
+            IEnumerator<T> mine = this.GetEnumerator();
+            IEnumerator<T> theirs = other.GetEnumerator();
+
+            bool mineEnded = !mine.MoveNext();
+            bool theirsEnded = !theirs.MoveNext();
+
+            bool hasPrevOther = false;
+            T prevOther = default!;
+
+            while (!mineEnded && !theirsEnded)
+            {
+                T theirsCurrent = theirs.Current;
+
+                // Collapse duplicates in "other"
+                if (hasPrevOther && comparer.Compare(prevOther, theirsCurrent) == 0)
+                {
+                    theirsEnded = !theirs.MoveNext();
+                    continue;
+                }
+
+                int comp = comparer.Compare(mine.Current, theirsCurrent);
+
+                if (comp < 0)
+                {
+                    merged[c++] = mine.Current;
+                    mineEnded = !mine.MoveNext();
+                }
+                else if (comp == 0)
+                {
+                    merged[c++] = theirsCurrent;
+                    mineEnded = !mine.MoveNext();
+
+                    prevOther = theirsCurrent;
+                    hasPrevOther = true;
+                    theirsEnded = !theirs.MoveNext();
+                }
+                else
+                {
+                    merged[c++] = theirsCurrent;
+                    prevOther = theirsCurrent;
+                    hasPrevOther = true;
+                    theirsEnded = !theirs.MoveNext();
+                }
+            }
+
+            // Remaining elements
+            if (!mineEnded)
+            {
+                do
+                {
+                    merged[c++] = mine.Current;
+                }
+                while (mine.MoveNext());
+            }
+            else if (!theirsEnded)
+            {
+                do
+                {
+                    T current = theirs.Current;
+
+                    if (!hasPrevOther || comparer.Compare(prevOther, current) != 0)
+                    {
+                        merged[c++] = current;
+                        prevOther = current;
+                        hasPrevOther = true;
+                    }
+                }
+                while (theirs.MoveNext());
+            }
+
+            // Replace tree
+            root = null;
+            EnsureTreeOrder(merged, c); // J2N: ensure the order matches the underlying tree if we have a reverse view
+            root = ConstructRootFromSortedArray(merged, 0, c - 1, null);
+            count = c;
+            version++;
+        }
+
+        private static Node? ConstructRootFromSortedArray(ReadOnlySpan<T> arr, int startIndex, int endIndex, Node? redNode)
         {
             // You're given a sorted array... say 1 2 3 4 5 6
             // There are 2 cases:
@@ -2769,6 +3309,112 @@ namespace J2N.Collections.Generic
             return root;
         }
 
+        private bool TryGetSortedItems(IEnumerable<T> source, out T[] items, out int count)
+        {
+            items = null!;
+            count = 0;
+
+            if (TryGetDistinctSortedCollection(source, out IDistinctSortedCollection<T>? sortedSet))
+            {
+                if (ComparerEquals(Comparer, sortedSet.Comparer))
+                {
+                    items = EnumerableHelpers.ToArray(source, out count);
+                    return true;
+                }
+                return false;
+            }
+
+            if (TryGetSortedCollection(source, out ISortedCollection<T>? sortedCollection))
+            {
+                IComparer<T>? comparer = Comparer;
+                if (ComparerEquals(comparer, sortedCollection.Comparer))
+                {
+                    items = EnumerableHelpers.ToDistinctArray(source, out count, comparer);
+                    return true;
+                }
+                return false;
+            }
+
+            return false;
+        }
+
+        private static bool TryGetDistinctSortedCollection(IEnumerable<T> source, [MaybeNullWhen(false)] out IDistinctSortedCollection<T> distinctSortedCollection)
+        {
+            if (source is IDistinctSortedCollection<T> sorted)
+            {
+                distinctSortedCollection = sorted;
+                return true;
+            }
+
+            if (source is SCG.SortedSet<T> bclSortedSet)
+            {
+                distinctSortedCollection = new BclSortedSetAdapter(bclSortedSet);
+                return true;
+            }
+
+            // J2N TODO: Add support for SCG.SortedDictionary<T,>.KeyCollection
+            distinctSortedCollection = default;
+            return false;
+        }
+
+        private static bool TryGetSortedCollection(IEnumerable<T> source, [MaybeNullWhen(false)] out ISortedCollection<T> sortedCollection)
+        {
+            if (source is ISortedCollection<T> sorted)
+            {
+                sortedCollection = sorted;
+                return true;
+            }
+
+            sortedCollection = default;
+
+            // J2N TODO: Add support for SCG.SortedDictionary<,T>.ValueCollection
+            //Type type = source.GetType();
+            //if (!type.IsGenericType)
+            //    return false;
+
+            //Type def = type.GetGenericTypeDefinition();
+
+            //// SortedDictionary values
+            //if (def == typeof(SCG.SortedDictionary<,>.ValueCollection) &&
+            //    ComparerEquals(Comparer, Comparer<T>.Default))
+            //{
+            //    return true;
+            //}
+
+            return false;
+        }
+
+        private sealed class BclSortedSetAdapter : IDistinctSortedCollection<T>
+        {
+            private readonly SCG.SortedSet<T> set;
+
+            public BclSortedSetAdapter(SCG.SortedSet<T> sortedSet)
+            {
+                Debug.Assert(sortedSet != null);
+                this.set = sortedSet!; // [!] asserted above
+            }
+
+            public int Count => set.Count;
+
+            bool ICollection<T>.IsReadOnly => ((ICollection<T>)set).IsReadOnly;
+
+            public IComparer<T> Comparer => set.Comparer;
+
+            public void Add(T item) => set.Add(item);
+
+            public void Clear() => set.Clear();
+
+            public bool Contains(T item) => set.Contains(item);
+
+            public void CopyTo(T[] array, int index) => set.CopyTo(array, index);
+
+            public IEnumerator<T> GetEnumerator() => set.GetEnumerator();
+
+            public bool Remove(T item) => set.Remove(item);
+
+            IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable)set).GetEnumerator();
+        }
+
         /// <summary>
         /// Modifies the current <see cref="SortedSet{T}"/> object so that it contains only elements
         /// that are also in a specified collection.
@@ -2778,10 +3424,15 @@ namespace J2N.Collections.Generic
         /// <remarks>
         /// This method ignores any duplicate elements in <paramref name="other"/>.
         /// <para/>
-        /// If the collection represented by the <paramref name="other"/> parameter is a <see cref="SortedSet{T}"/> collection with
-        /// the same equality comparer as the current <see cref="SortedSet{T}"/> object, this method is an <c>O(n)</c>
-        /// operation. Otherwise, this method is an <c>O(n + m)</c> operation, where <c>n</c> is <see cref="Count"/> and <c>m</c>
-        /// is the number of elements in <paramref name="other"/>.
+        /// If the collection represented by the <paramref name="other"/> parameter is a <see cref="SortedSet{T}"/>,
+        /// <see cref="SCG.SortedSet{T}"/>, <see cref="IDistinctSortedCollection{T}"/> with the same equality comparer
+        /// as the current <see cref="SortedSet{T}"/> object, this is an O(<c>n</c>) operation.
+        /// If the collection is an <see cref="ISortedCollection{T}"/> with the same equality comparer as the current
+        /// <see cref="SortedSet{T}"/> object, this method is an O(<c>n</c> + <c>m</c>) operation, where <c>n</c>
+        /// is <see cref="Count"/> and <c>m</c> is the number of elements in <paramref name="other"/>. Otherwise,
+        /// this method is an O(<c>m</c> * log <c>n</c> + <c>k</c> * log <c>k</c>) operation, where <c>k</c> is the
+        /// number of elements in the intersection. For range-restricted views, this method falls
+        /// back to incremental insertion per element to preserve range validation and projection invariants.
         /// </remarks>
         public virtual void IntersectWith(IEnumerable<T> other)
         {
@@ -2791,31 +3442,61 @@ namespace J2N.Collections.Generic
             if (Count == 0)
                 return;
 
+            // If other is empty, we can simply call Clear() to save some steps.
+            if (other is ICollection<T> genericCollection)
+            {
+                if (genericCollection.Count == 0)
+                {
+                    Clear();
+                    return;
+                }
+            }
+            else if (other is ICollection c)
+            {
+                if (c.Count == 0)
+                {
+                    Clear();
+                    return;
+                }
+            }
+
             if (other == this)
                 return;
 
             // HashSet<T> optimizations can't be done until equality comparers and comparers are related
 
-            // Technically, this would work as well with an ISorted<T>
-            SortedSet<T>? asSorted = other as SortedSet<T>;
-            TreeSubSet? treeSubset = this as TreeSubSet;
+            IDistinctSortedCollection<T>? asSorted;
+            if (other is not SCG.SortedSet<T> otherSortedSet)
+                asSorted = other as IDistinctSortedCollection<T>;
+            else
+                asSorted = new BclSortedSetAdapter(otherSortedSet);
 
-            if (treeSubset != null)
+            bool thisIsView = this is ICollectionView view && view.IsView;
+
+            if (thisIsView)
                 VersionCheck();
 
-            if (asSorted != null && treeSubset == null && HasEqualComparer(asSorted))
+            // If asSorted is null, this is not a distinct sorted collection.
+            if (asSorted == null && !thisIsView && other is ISortedCollection<T> otherSortedNonDistinct)
+            {
+                IntersectWithSortedNonDistinctCollection(otherSortedNonDistinct);
+                return;
+            }
+
+            IComparer<T>? comparer;
+            if (asSorted != null && !thisIsView && ComparerEquals(comparer = Comparer, asSorted.Comparer))
             {
                 // First do a merge sort to an array.
-                T[] merged = new T[this.Count];
+                T[] merged = new T[Math.Min(this.Count, asSorted.Count)];
                 int c = 0;
                 IEnumerator<T> mine = this.GetEnumerator();
                 IEnumerator<T> theirs = asSorted.GetEnumerator();
                 bool mineEnded = !mine.MoveNext(), theirsEnded = !theirs.MoveNext();
-                T? max = Max;
+                T? last = MaxInternal;
 
-                while (!mineEnded && !theirsEnded && Comparer.Compare(theirs.Current!, max!) <= 0)
+                while (!mineEnded && !theirsEnded && comparer.Compare(theirs.Current!, last!) <= 0)
                 {
-                    int comp = Comparer.Compare(mine.Current, theirs.Current);
+                    int comp = comparer.Compare(mine.Current, theirs.Current);
                     if (comp < 0)
                     {
                         mineEnded = !mine.MoveNext();
@@ -2837,6 +3518,7 @@ namespace J2N.Collections.Generic
                 // safe to gc the root, we  have all the elements
                 root = null;
 
+                EnsureTreeOrder(merged, c); // J2N: ensure the order matches the underlying tree if we have a reverse view
                 root = ConstructRootFromSortedArray(merged, 0, c - 1, null);
                 count = c;
                 version++;
@@ -2847,10 +3529,97 @@ namespace J2N.Collections.Generic
             }
         }
 
+        private void IntersectWithSortedNonDistinctCollection(ISortedCollection<T> other)
+        {
+            Debug.Assert(other != null);
+            Debug.Assert(Count > 0);
+
+            IComparer<T> comparer = Comparer;
+            if (ComparerEquals(comparer, other!.Comparer)) // [!] asserted above
+            {
+                // Result cannot exceed the smaller of this.Count or other.Count
+                T[] merged = new T[Math.Min(this.Count, other.Count)];
+                int c = 0;
+
+                IEnumerator<T> mine = this.GetEnumerator();
+                IEnumerator<T> theirs = other!.GetEnumerator(); // [!] asserted above
+
+                bool mineEnded = !mine.MoveNext();
+                bool theirsEnded = !theirs.MoveNext();
+
+                bool hasPrevOther = false;
+                T prevOther = default!;
+
+                // Optional pruning using Last
+                T last = MaxInternal!;
+
+                while (!mineEnded && !theirsEnded &&
+                       comparer.Compare(theirs.Current, last) <= 0)
+                {
+                    T theirsCurrent = theirs.Current;
+
+                    // Collapse duplicates in "other"
+                    if (hasPrevOther && comparer.Compare(theirsCurrent, prevOther) == 0)
+                    {
+                        theirsEnded = !theirs.MoveNext();
+                        continue;
+                    }
+
+                    int comp = comparer.Compare(mine.Current, theirsCurrent);
+
+                    if (comp < 0)
+                    {
+                        mineEnded = !mine.MoveNext();
+                    }
+                    else if (comp == 0)
+                    {
+                        merged[c++] = mine.Current;
+
+                        mineEnded = !mine.MoveNext();
+
+                        prevOther = theirsCurrent;
+                        hasPrevOther = true;
+                        theirsEnded = !theirs.MoveNext();
+                    }
+                    else
+                    {
+                        prevOther = theirsCurrent;
+                        hasPrevOther = true;
+                        theirsEnded = !theirs.MoveNext();
+                    }
+                }
+
+                // Rebuild tree from merged intersection
+                root = null;
+                EnsureTreeOrder(merged, c); // J2N: ensure the order matches the underlying tree if we have a reverse view
+                root = ConstructRootFromSortedArray(merged, 0, c - 1, null);
+                count = c;
+                version++;
+            }
+            else
+            {
+                IntersectWithEnumerable(other);
+            }
+        }
+
+        // J2N: Optimized fallback to reduce allocations and tree noise with Add()
         internal virtual void IntersectWithEnumerable(IEnumerable<T> other)
         {
-            // TODO: Perhaps a more space-conservative way to do this
-            List<T> toSave = new List<T>(Count);
+            int? otherCount = null;
+            if (other is ICollection<T> genericCollection)
+            {
+                otherCount = genericCollection.Count;
+            }
+            else if (other is ICollection c)
+            {
+                otherCount = c.Count;
+            }
+
+            // J2N: Clear() is unnecessary here because we do it at the top of IntersectWith()
+            // So we should never reach here if otherCount is 0 (if other is a collection)
+            Debug.Assert(otherCount is null || otherCount > 0);
+
+            List<T> toSave = new(otherCount.HasValue ? Math.Min(this.Count, otherCount.Value) : this.Count);
             foreach (T item in other)
             {
                 if (Contains(item))
@@ -2859,10 +3628,48 @@ namespace J2N.Collections.Generic
                 }
             }
 
-            Clear();
-            foreach (T item in toSave)
+            bool thisIsView = this is ICollectionView view && view.IsView;
+
+            if (!thisIsView)
             {
-                Add(item);
+                int count = toSave.Count;
+
+                if (count > 0)
+                {
+                    T[] elements = toSave._items;
+                    Array.Sort(elements, 0, count, comparer);
+
+                    // Overwrite duplicates while shifting the distinct elements towards
+                    // the front of the array.
+                    int index = 1;
+                    for (int i = 1; i < count; i++)
+                    {
+                        if (comparer.Compare(elements[i], elements[i - 1]) != 0)
+                        {
+                            elements[index++] = elements[i];
+                        }
+                    }
+
+                    count = index;
+                    root = null;
+                    root = ConstructRootFromSortedArray(elements, 0, count - 1, null);
+                    this.count = count;
+                    version++;
+                }
+                else
+                {
+                    Clear();
+                }
+            }
+            else
+            {
+                // J2N: Rebuilding the root of a TreeSubSet is not valid, as the underlying set may
+                // have elements outside of the view. So, we must use Clear() and Add() to ensure validity.
+                Clear();
+                foreach (T item in toSave)
+                {
+                    Add(item);
+                }
             }
         }
 
@@ -2875,16 +3682,37 @@ namespace J2N.Collections.Generic
         /// This method removes any element in the current <see cref="SortedSet{T}"/> that is also in <paramref name="other"/>.
         /// Duplicate values in <paramref name="other"/> are ignored.
         /// <para/>
-        /// This method is an <c>O(n)</c> operation, where <c>n</c> is the number of elements in the
-        /// <paramref name="other"/> parameter.
+        /// If the collection represented by the <paramref name="other"/> parameter is a <see cref="SortedSet{T}"/>,
+        /// <see cref="SortedDictionary{TKey, TValue}.KeyCollection"/>, <see cref="SortedDictionary{TKey, TValue}"/>,
+        /// <see cref="SCG.SortedSet{T}"/>, or <see cref="IDistinctSortedCollection{T}"/> with the same equality
+        /// comparer as the current <see cref="SortedSet{T}"/> object, this method is an O(<c>k</c> log <c>n</c>)
+        /// where <c>n</c> is <see cref="Count"/> and <c>k</c> is the number of elements in <paramref name="other"/>
+        /// that fall within the range of the current set. Otherwise, this method is an O(<c>m</c> log <c>n</c>) operation,
+        /// where <c>m</c> is the number of elements in the <paramref name="other"/> parameter.
         /// </remarks>
         public void ExceptWith(IEnumerable<T> other)
         {
             if (other is null)
                 ThrowHelper.ThrowArgumentNullException(ExceptionArgument.other);
 
-            if (count == 0)
+            // J2N: Important - We call the Count property here on purpose rather than the count field
+            // because it will do a version check and update the count if we are a TreeSubSet view.
+            // We also call other.Count to ensure any other views are also up to date for the Min and Max
+            // calls below.
+            if (Count == 0)
                 return;
+
+            // Other is already the empty set; return.
+            if (other is ICollection<T> genericCollection)
+            {
+                if (genericCollection.Count == 0)
+                    return;
+            }
+            else if (other is ICollection c)
+            {
+                if (c.Count == 0)
+                    return;
+            }
 
             if (other == this)
             {
@@ -2892,29 +3720,74 @@ namespace J2N.Collections.Generic
                 return;
             }
 
-            SortedSet<T>? asSorted = other as SortedSet<T>;
-
-            if (asSorted != null && HasEqualComparer(asSorted))
+            if (other is INavigableCollection<T> navigableCollection)
             {
-                // Outside range, no point in doing anything
-                if (comparer.Compare(asSorted.Max!, Min!) >= 0 && comparer.Compare(asSorted.Min!, Max!) <= 0)
+                IComparer<T> comparer = Comparer;
+                if (ComparerEquals(comparer, navigableCollection.Comparer))
                 {
-                    T? min = Min;
-                    T? max = Max;
+                    // Outside range, no point in doing anything
+                    if (navigableCollection.TryGetLast(out T? otherLast) &&
+                        navigableCollection.TryGetFirst(out T? otherFirst) &&
+                        comparer.Compare(otherLast, MinInternal!) >= 0 &&
+                        comparer.Compare(otherFirst, MaxInternal!) <= 0)
+                    {
+                        T? first = MinInternal;
+                        T? last = MaxInternal;
+                        foreach (T item in other)
+                        {
+                            if (comparer.Compare(item!, first!) < 0)
+                                continue;
+                            if (comparer.Compare(item!, last!) > 0)
+                                break;
+                            Remove(item);
+                        }
+                    }
+                    return;
+                }
+            }
+            // J2N: RemoveAllElements() also uses Contains() to remove unnecessary calls to Remove() when there are duplicates in ISortedCollection<T>.
+            else if (other is IDistinctSortedCollection<T> sortedCollection)
+            {
+                IComparer<T> comparer = Comparer;
+                if (ComparerEquals(comparer, sortedCollection.Comparer))
+                {
+                    T? first = MinInternal;
+                    T? last = MaxInternal;
                     foreach (T item in other)
                     {
-                        if (comparer.Compare(item!, min!) < 0)
+                        if (comparer.Compare(item!, first!) < 0)
                             continue;
-                        if (comparer.Compare(item!, max!) > 0)
+                        if (comparer.Compare(item!, last!) > 0)
                             break;
                         Remove(item);
                     }
+                    return;
                 }
             }
-            else
+            else if (other is SCG.SortedSet<T> bclSortedSet)
             {
-                RemoveAllElements(other);
+                IComparer<T> comparer = Comparer;
+                if (ComparerEquals(comparer, bclSortedSet.Comparer))
+                {
+                    // Outside range, no point in doing anything
+                    if (comparer.Compare(bclSortedSet.Max!, MinInternal!) >= 0 && comparer.Compare(bclSortedSet.Min!, MaxInternal!) <= 0)
+                    {
+                        T? first = MinInternal;
+                        T? last = MaxInternal;
+                        foreach (T item in bclSortedSet)
+                        {
+                            if (comparer.Compare(item!, first!) < 0)
+                                continue;
+                            if (comparer.Compare(item!, last!) > 0)
+                                break;
+                            Remove(item);
+                        }
+                    }
+                    return;
+                }
             }
+
+            RemoveAllElements(other);
         }
 
         /// <summary>
@@ -2926,7 +3799,8 @@ namespace J2N.Collections.Generic
         /// <remarks>
         /// Any duplicate elements in <paramref name="other"/> are ignored.
         /// <para/>
-        /// If the other parameter is a <see cref="SortedSet{T}"/> collection with the same equality comparer as
+        /// If the other parameter is a <see cref="SortedSet{T}"/>, <see cref="SortedDictionary{TKey, TValue}.KeyCollection"/>,
+        /// <see cref="IDistinctSortedCollection{T}"/> or <see cref="ISortedCollection{T}"/> with the same equality comparer as
         /// the current <see cref="SortedSet{T}"/> object, this method is an <c>O(n log m)</c> operation. Otherwise,
         /// this method is an <c>O(n log m) + O(n log n)</c> operation, where <c>n</c> is the number of elements
         /// in <paramref name="other"/> and <c>m</c> is <see cref="Count"/>.
@@ -2948,30 +3822,81 @@ namespace J2N.Collections.Generic
                 return;
             }
 
-            SortedSet<T>? asSorted = other as SortedSet<T>;
+            if (other is IDistinctSortedCollection<T> distinctSortedCollection)
+            {
+                if (ComparerEquals(Comparer, distinctSortedCollection!.Comparer))
+                {
+                    SymmetricExceptWithSameComparer(distinctSortedCollection);
+                    return;
+                }
+            }
+            else if (other is ISortedCollection<T> sortedCollection)
+            {
+                IComparer<T> comparer = Comparer;
+                if (ComparerEquals(comparer, sortedCollection!.Comparer))
+                {
+                    SymmetricExceptWithSameComparer(sortedCollection, comparer);
+                    return;
+                }
+            }
 
-            if (asSorted != null && HasEqualComparer(asSorted))
-            {
-                SymmetricExceptWithSameComparer(asSorted);
-            }
-            else
-            {
-                int length;
-                T[] elements = EnumerableHelpers.ToArray(other, out length);
-                Array.Sort(elements, 0, length, Comparer);
-                SymmetricExceptWithSameComparer(elements, length);
-            }
+            int length;
+            T[] elements = EnumerableHelpers.ToArray(other, out length);
+            Array.Sort(elements, 0, length, comparer); // J2N: Always use forward comparer to match underlying tree
+            SymmetricExceptWithSameComparer(elements, length);
         }
 
-        private void SymmetricExceptWithSameComparer(SortedSet<T> other)
+        private void SymmetricExceptWithSameComparer(IDistinctSortedCollection<T> other)
         {
             Debug.Assert(other != null);
-            Debug.Assert(HasEqualComparer(other!));
+            Debug.Assert(ComparerEquals(Comparer, other!.Comparer));
+
+            if (other!.Count == 0) // [!] asserted above
+            {
+                return;
+            }
 
             foreach (T item in other!)
             {
-                bool result = Contains(item) ? Remove(item) : Add(item);
-                Debug.Assert(result);
+                SymmetricExceptWithValue(item);
+            }
+        }
+
+        private void SymmetricExceptWithSameComparer(ISortedCollection<T> other, IComparer<T> comparer)
+        {
+            Debug.Assert(other != null);
+            Debug.Assert(ComparerEquals(Comparer, other!.Comparer));
+
+            if (other!.Count == 0) // [!] asserted above
+            {
+                return;
+            }
+
+            using var enumerator = other.GetEnumerator();
+            bool hasNext = enumerator.MoveNext();
+            Debug.Assert(hasNext);
+
+            T current = enumerator.Current;
+            while (true)
+            {
+                T next = default!;
+
+                // Skip duplicates
+                while (hasNext = enumerator.MoveNext())
+                {
+                    next = enumerator.Current;
+                    if (comparer.Compare(next, current) != 0)
+                        break;
+                }
+
+                // Process the current unique value
+                SymmetricExceptWithValue(current);
+
+                // If no more items, we are done.
+                if (!hasNext)
+                    break;
+
+                current = next;
             }
         }
 
@@ -2993,10 +3918,15 @@ namespace J2N.Collections.Generic
                 if (i >= count)
                     break;
                 T current = other[i];
-                bool result = Contains(current) ? Remove(current) : Add(current);
-                Debug.Assert(result);
+                SymmetricExceptWithValue(current);
                 previous = current;
             }
+        }
+
+        internal virtual void SymmetricExceptWithValue(T item)
+        {
+            bool result = Contains(item) ? Remove(item) : Add(item);
+            Debug.Assert(result);
         }
 
         /// <summary>
@@ -3011,9 +3941,13 @@ namespace J2N.Collections.Generic
         /// <para/>
         /// This method always returns <c>false</c> if <see cref="Count"/> is greater than the number of elements in <paramref name="other"/>.
         /// <para/>
-        /// If the collection represented by <paramref name="other"/> is a <see cref="SortedSet{T}"/> collection with the same equality comparer as the
-        /// current <see cref="SortedSet{T}"/> object, this method is an <c>O(n)</c> operation. Otherwise, this method is an
-        /// <c>O(n + m)</c> operation, where <c>n</c> is <see cref="Count"/> and <c>m</c> is the number of elements in <paramref name="other"/>.
+        /// If the collection represented by <paramref name="other"/> is a <see cref="SortedSet{T}"/>,
+        /// <see cref="SortedDictionary{TKey, TValue}.KeyCollection"/>, or <see cref="SCG.SortedSet{T}"/> with the same equality comparer as the
+        /// current <see cref="SortedSet{T}"/> object, this method is an O(<c>n</c>) operation. If the collection represented by <paramref name="other"/>
+        /// is a <see cref="HashSet{T}"/>, <see cref="OrderedHashSet{T}"/>, <see cref="SCG.HashSet{T}"/>, or <see cref="ISortedCollection{T}"/> this method
+        /// is an O(<c>n</c> log <c>m</c>) operation, where <c>n</c> is <see cref="Count"/> and <c>m</c> is the number of elements in <paramref name="other"/>.
+        /// Otherwise, this method is an O(<c>n</c> log <c>n</c> + <c>m</c> log <c>n</c>) operation, where <c>n</c> is <see cref="Count"/> and
+        /// <c>m</c> is the number of elements in <paramref name="other"/>.
         /// </remarks>
         public bool IsSubsetOf(IEnumerable<T> other)
         {
@@ -3025,27 +3959,120 @@ namespace J2N.Collections.Generic
                 return true;
             }
 
-            SortedSet<T>? asSorted = other as SortedSet<T>;
-            if (asSorted != null && HasEqualComparer(asSorted))
+            // for sorted sets, sorted dictionaries, or sorted dictionary key collections with the same comparer
+            if (other is INavigableCollection<T> navigableCollection)
             {
-                if (Count > asSorted.Count)
-                    return false;
-                return IsSubsetOfSortedSetWithSameComparer(asSorted);
+                if (ComparerEquals(Comparer, navigableCollection.Comparer))
+                {
+                    if (count > navigableCollection.Count)
+                        return false;
+
+                    return IsSubsetOfNavigableCollectionWithSameComparer(navigableCollection);
+                }
             }
-            else
+            else if (other is IDistinctSortedCollection<T> distinctSortedCollection)
             {
-                // Worst case: I mark every element in my set and see if I've counted all of them. O(M log N).
-                ElementCount result = CheckUniqueAndUnfoundElements(other, false);
-                return result.UniqueCount == Count && result.UnfoundCount >= 0;
+                if (ComparerEquals(Comparer, distinctSortedCollection.Comparer))
+                {
+                    if (count > distinctSortedCollection.Count)
+                        return false;
+
+                    return IsSubsetOfCollectionWithSameComparer(distinctSortedCollection);
+                }
             }
+            else if (other is ISortedCollection<T> sortedCollection)
+            {
+                if (ComparerEquals(Comparer, sortedCollection.Comparer))
+                {
+                    // Non-distinct, so we cannot optimize on count here
+
+                    return IsSubsetOfCollectionWithSameComparer(sortedCollection);
+                }
+            }
+            else if (other is HashSet<T> hashSet)
+            {
+                if (ComparerEquals(Comparer, hashSet.EqualityComparer))
+                {
+                    if (count > hashSet.Count)
+                        return false;
+
+                    return IsSubsetOfCollectionWithSameComparer(hashSet);
+                }
+            }
+            else if (other is OrderedHashSet<T> orderedHashSet)
+            {
+                if (ComparerEquals(Comparer, orderedHashSet.EqualityComparer))
+                {
+                    if (count > orderedHashSet.Count)
+                        return false;
+
+                    return IsSubsetOfCollectionWithSameComparer(orderedHashSet);
+                }
+            }
+            else if (other is SCG.SortedSet<T> bclSortedSet)
+            {
+                if (ComparerEquals(Comparer, bclSortedSet.Comparer))
+                {
+                    if (count > bclSortedSet.Count)
+                        return false;
+
+                    return IsSubsetOfBclSortedSetWithSameComparer(bclSortedSet);
+                }
+            }
+            else if (other is SCG.HashSet<T> bclHashSet)
+            {
+                if (ComparerEquals(Comparer, bclHashSet.Comparer))
+                {
+                    if (count > bclHashSet.Count)
+                        return false;
+
+                    return IsSubsetOfCollectionWithSameComparer(bclHashSet);
+                }
+            }
+
+            // Worst case: I mark every element in my set and see if I've counted all of them. O(M log N).
+            ElementCount result = CheckUniqueAndUnfoundElements(other, false);
+            return result.UniqueCount == Count && result.UnfoundCount >= 0;
         }
 
-        private bool IsSubsetOfSortedSetWithSameComparer(SortedSet<T> asSorted)
+        private bool IsSubsetOfNavigableCollectionWithSameComparer(INavigableCollection<T> navigableCollection)
         {
-            SortedSet<T> prunedOther = asSorted.GetViewBetween(Min, Max);
+            // J2N: If other is a view, GetView() may throw, so we fall back.
+            if (navigableCollection is ICollectionView view && view.IsView)
+                return IsSubsetOfCollectionWithSameComparer(navigableCollection);
+
+            // J2N: We cannot make any assumptions about the whether the inclusivity of the other collection is the same as this one,
+            // so we override it. The Contains() call will weed out the bounds if they are different.
+            INavigableCollection<T> prunedOther = navigableCollection.GetView(MinInternal, fromInclusive: true, MaxInternal, toInclusive: true);
             foreach (T item in this)
             {
                 if (!prunedOther.Contains(item))
+                    return false;
+            }
+            return true;
+        }
+
+        private bool IsSubsetOfBclSortedSetWithSameComparer(SCG.SortedSet<T> bclSortedSet)
+        {
+            // J2N: If this is not exactly SCG.SortedSet<T>, we assume it is a view.
+            // J2N: If other is a view, GetViewBetween() may throw, so we fall back.
+            if (bclSortedSet.GetType() != typeof(SCG.SortedSet<T>))
+                return IsSubsetOfCollectionWithSameComparer(bclSortedSet);
+
+            SCG.SortedSet<T> prunedOther = bclSortedSet.GetViewBetween(LowerValue!, UpperValue!);
+            foreach (T item in this)
+            {
+                if (!prunedOther.Contains(item))
+                    return false;
+            }
+            return true;
+        }
+
+        private bool IsSubsetOfCollectionWithSameComparer(ICollection<T> collection)
+        {
+            foreach (T item in this)
+            {
+                if (!collection.Contains(item))
                     return false;
             }
             return true;
@@ -3066,29 +4093,90 @@ namespace J2N.Collections.Generic
         /// This method always returns false if <see cref="Count"/> is greater than or equal to the number of elements
         /// in <paramref name="other"/>.
         /// <para/>
-        /// If the collection represented by <paramref name="other"/> is a <see cref="SortedSet{T}"/> collection with the same
-        /// equality comparer as the current <see cref="SortedSet{T}"/> object, then this method is an <c>O(n)</c>
-        /// operation. Otherwise, this method is an <c>O(n + m)</c> operation, where <c>n</c> is <see cref="Count"/> and <c>m</c>
-        /// is the number of elements in <paramref name="other"/>.
+        /// If the collection represented by <paramref name="other"/> is a <see cref="SortedSet{T}"/>,
+        /// <see cref="SortedDictionary{TKey, TValue}.KeyCollection"/>, or <see cref="SCG.SortedSet{T}"/> with the same equality comparer as the
+        /// current <see cref="SortedSet{T}"/> object, this method is an O(<c>n</c>) operation. If the collection represented by <paramref name="other"/>
+        /// is a <see cref="HashSet{T}"/>, <see cref="OrderedHashSet{T}"/>, <see cref="SCG.HashSet{T}"/>, or <see cref="ISortedCollection{T}"/> this method
+        /// is an O(<c>n</c> log <c>m</c>) operation, where <c>n</c> is <see cref="Count"/> and <c>m</c> is the number of elements in <paramref name="other"/>.
+        /// Otherwise, this method is an O(<c>n</c> log <c>n</c> + <c>m</c> log <c>n</c>) operation, where <c>n</c> is <see cref="Count"/> and
+        /// <c>m</c> is the number of elements in <paramref name="other"/>.
         /// </remarks>
         public bool IsProperSubsetOf(IEnumerable<T> other)
         {
             if (other is null)
                 ThrowHelper.ThrowArgumentNullException(ExceptionArgument.other);
 
-            if (other is ICollection c)
+            if (other is ICollection<T> genericCollection)
+            {
+                if (Count == 0)
+                    return genericCollection.Count > 0;
+            }
+            else if (other is ICollection c)
             {
                 if (Count == 0)
                     return c.Count > 0;
             }
 
-            // another for sorted sets with the same comparer
-            SortedSet<T>? asSorted = other as SortedSet<T>;
-            if (asSorted != null && HasEqualComparer(asSorted))
+            // for sorted sets, sorted dictionaries, or sorted dictionary key collections with the same comparer
+            if (other is INavigableCollection<T> navigableCollection)
             {
-                if (Count >= asSorted.Count)
-                    return false;
-                return IsSubsetOfSortedSetWithSameComparer(asSorted);
+                if (ComparerEquals(Comparer, navigableCollection.Comparer))
+                {
+                    if (count >= navigableCollection.Count)
+                        return false;
+
+                    return IsSubsetOfNavigableCollectionWithSameComparer(navigableCollection);
+                }
+            }
+            else if (other is IDistinctSortedCollection<T> distinctSortedCollection)
+            {
+                if (ComparerEquals(Comparer, distinctSortedCollection.Comparer))
+                {
+                    if (count >= distinctSortedCollection.Count)
+                        return false;
+
+                    return IsSubsetOfCollectionWithSameComparer(distinctSortedCollection);
+                }
+            }
+            else if (other is HashSet<T> hashSet)
+            {
+                if (ComparerEquals(Comparer, hashSet.EqualityComparer))
+                {
+                    if (count >= hashSet.Count)
+                        return false;
+
+                    return IsSubsetOfCollectionWithSameComparer(hashSet);
+                }
+            }
+            else if (other is OrderedHashSet<T> orderedHashSet)
+            {
+                if (ComparerEquals(Comparer, orderedHashSet.EqualityComparer))
+                {
+                    if (count >= orderedHashSet.Count)
+                        return false;
+
+                    return IsSubsetOfCollectionWithSameComparer(orderedHashSet);
+                }
+            }
+            else if (other is SCG.SortedSet<T> bclSortedSet)
+            {
+                if (ComparerEquals(Comparer, bclSortedSet.Comparer))
+                {
+                    if (count >= bclSortedSet.Count)
+                        return false;
+
+                    return IsSubsetOfBclSortedSetWithSameComparer(bclSortedSet);
+                }
+            }
+            else if (other is SCG.HashSet<T> bclHashSet)
+            {
+                if (ComparerEquals(Comparer, bclHashSet.Comparer))
+                {
+                    if (count >= bclHashSet.Count)
+                        return false;
+
+                    return IsSubsetOfCollectionWithSameComparer(bclHashSet);
+                }
             }
 
             // Worst case: I mark every element in my set and see if I've counted all of them. O(M log N).
@@ -3110,37 +4198,150 @@ namespace J2N.Collections.Generic
         /// <para/>
         /// This method always returns <c>false</c> if <see cref="Count"/> is less than the number of elements in <paramref name="other"/>.
         /// <para/>
-        /// If the collection represented by <paramref name="other"/> is a <see cref="SortedSet{T}"/> collection with
-        /// the same equality comparer as the current <see cref="SortedSet{T}"/> object, this method is an <c>O(n)</c>
-        /// operation. Otherwise, this method is an <c>O(n + m)</c> operation, where <c>n</c> is the number of
-        /// elements in <paramref name="other"/> and <c>m</c> is <see cref="Count"/>.
+        /// If the collection represented by <paramref name="other"/> is a <see cref="SortedSet{T}"/>,
+        /// <see cref="SortedDictionary{TKey, TValue}.KeyCollection"/>, or <see cref="SCG.SortedSet{T}"/> with the same equality comparer as the
+        /// current <see cref="SortedSet{T}"/> object, this method is an O(<c>n</c>) operation. If the collection represented by <paramref name="other"/>
+        /// is a <see cref="HashSet{T}"/>, <see cref="OrderedHashSet{T}"/>, <see cref="SCG.HashSet{T}"/>, or <see cref="ISortedCollection{T}"/> this method
+        /// is an O(<c>n</c> log <c>m</c>) operation, where <c>n</c> is the number of elements in <paramref name="other"/> and <c>m</c> is <see cref="Count"/>.
+        /// Otherwise, this method is an O(<c>n</c> log <c>n</c> + <c>m</c> log <c>n</c>) operation, where <c>n</c> is the number of elements in
+        /// <paramref name="other"/> and <c>m</c> is <see cref="Count"/>.
         /// </remarks>
         public bool IsSupersetOf(IEnumerable<T> other)
         {
             if (other is null)
                 ThrowHelper.ThrowArgumentNullException(ExceptionArgument.other);
 
-            if (other is ICollection c && c.Count == 0)
-                return true;
-
-            // do it one way for HashSets
-            // another for sorted sets with the same comparer
-            SortedSet<T>? asSorted = other as SortedSet<T>;
-            if (asSorted != null && HasEqualComparer(asSorted))
+            if (other is ICollection<T> genericCollection)
             {
-                if (Count < asSorted.Count)
-                    return false;
-                SortedSet<T> pruned = GetViewBetween(asSorted.Min, asSorted.Max);
-                foreach (T item in asSorted)
+                if (genericCollection.Count == 0)
+                    return true;
+            }
+            else if (other is ICollection c)
+            {
+                if (c.Count == 0)
+                    return true;
+            }
+
+            if (other is INavigableCollection<T> navigableCollection)
+            {
+                if (ComparerEquals(Comparer, navigableCollection.Comparer))
                 {
-                    if (!pruned.Contains(item))
+                    if (Count < navigableCollection.Count)
                         return false;
+
+                    return IsSupersetOfNavigableCollectionWithSameComparer(navigableCollection);
                 }
-                return true;
+            }
+            else if (other is IDistinctSortedCollection<T> distinctSortedCollection)
+            {
+                if (ComparerEquals(Comparer, distinctSortedCollection.Comparer))
+                {
+                    if (Count < distinctSortedCollection.Count)
+                        return false;
+
+                    return IsSupersetOfEnumerableWithSameComparer(distinctSortedCollection);
+                }
+            }
+            else if (other is ISortedCollection<T> sortedCollection)
+            {
+                if (ComparerEquals(Comparer, sortedCollection.Comparer))
+                {
+                    // Non-distinct, so we cannot optimize on count here
+
+                    return IsSupersetOfEnumerableWithSameComparer(sortedCollection);
+                }
+            }
+            else if (other is HashSet<T> hashSet)
+            {
+                if (ComparerEquals(Comparer, hashSet.EqualityComparer))
+                {
+                    if (Count < hashSet.Count)
+                        return false;
+
+                    return IsSupersetOfEnumerableWithSameComparer(hashSet);
+                }
+            }
+            else if (other is OrderedHashSet<T> orderedHashSet)
+            {
+                if (ComparerEquals(Comparer, orderedHashSet.EqualityComparer))
+                {
+                    if (Count < orderedHashSet.Count)
+                        return false;
+
+                    return IsSupersetOfEnumerableWithSameComparer(orderedHashSet);
+                }
+            }
+            else if (other is SCG.SortedSet<T> bclSortedSet)
+            {
+                if (ComparerEquals(Comparer, bclSortedSet.Comparer))
+                {
+                    if (Count < bclSortedSet.Count)
+                        return false;
+
+                    return IsSupersetOfBclSortedSetWithSameComparer(bclSortedSet);
+                }
+            }
+            else if (other is SCG.HashSet<T> bclHashSet)
+            {
+                if (ComparerEquals(Comparer, bclHashSet.Comparer))
+                {
+                    if (Count < bclHashSet.Count)
+                        return false;
+
+                    return IsSupersetOfEnumerableWithSameComparer(bclHashSet);
+                }
             }
 
             // and a third for everything else
             return ContainsAllElements(other);
+        }
+
+        private bool IsSupersetOfNavigableCollectionWithSameComparer(INavigableCollection<T> navigableCollection)
+        {
+            // J2N: If this is a view, GetView() may throw, so we fall back.
+            if (this is ICollectionView view && view.IsView)
+                return IsSupersetOfEnumerableWithSameComparer(navigableCollection);
+
+            if (!navigableCollection.TryGetFirst(out T? otherFirst) || !navigableCollection.TryGetLast(out T? otherLast))
+            {
+                // Other is empty, so we are done.
+                return true;
+            }
+
+            // J2N: We cannot make any assumptions about the whether the inclusivity of this collection is the same as the other one,
+            // so we use explicit bounds. The Contains() call will weed out the bounds if they are different.
+            SortedSet<T> pruned = GetView(otherFirst, fromInclusive: true, otherLast, toInclusive: true);
+            foreach (T item in navigableCollection)
+            {
+                if (!pruned.Contains(item))
+                    return false;
+            }
+            return true;
+        }
+
+        private bool IsSupersetOfBclSortedSetWithSameComparer(SCG.SortedSet<T> bclSortedSet)
+        {
+            // J2N: If other is a view, GetView() may throw, so we fall back.
+            if (this is ICollectionView view && view.IsView)
+                return IsSupersetOfEnumerableWithSameComparer(bclSortedSet);
+
+            SortedSet<T> pruned = GetView(bclSortedSet.Min, bclSortedSet.Max);
+            foreach (T item in bclSortedSet)
+            {
+                if (!pruned.Contains(item))
+                    return false;
+            }
+            return true;
+        }
+
+        private bool IsSupersetOfEnumerableWithSameComparer(IEnumerable<T> collection)
+        {
+            foreach (T item in collection)
+            {
+                if (!Contains(item))
+                    return false;
+            }
+            return true;
         }
 
         /// <summary>
@@ -3156,9 +4357,13 @@ namespace J2N.Collections.Generic
         /// <para/>
         /// This method always returns <c>false</c> if <see cref="Count"/> is less than or equal to the number of elements in <paramref name="other"/>.
         /// <para/>
-        /// If the collection represented by <paramref name="other"/> is a <see cref="SortedSet{T}"/> collection with the same equality comparer
-        /// as the current <see cref="SortedSet{T}"/> object, this method is an <c>O(n)</c> operation. Otherwise, this
-        /// method is an <c>O(n + m)</c> operation, where <c>n</c> is the number of elements in <paramref name="other"/> and <c>m</c> is <see cref="Count"/>.
+        /// If the collection represented by <paramref name="other"/> is a <see cref="SortedSet{T}"/>,
+        /// <see cref="SortedDictionary{TKey, TValue}.KeyCollection"/>, or <see cref="SCG.SortedSet{T}"/> with the same equality comparer as the
+        /// current <see cref="SortedSet{T}"/> object, this method is an O(<c>n</c>) operation. If the collection represented by <paramref name="other"/>
+        /// is a <see cref="HashSet{T}"/>, <see cref="OrderedHashSet{T}"/>, <see cref="SCG.HashSet{T}"/>, or <see cref="ISortedCollection{T}"/> this method
+        /// is an O(<c>n</c> log <c>m</c>) operation, where <c>n</c> is the number of elements in <paramref name="other"/> and <c>m</c> is <see cref="Count"/>.
+        /// Otherwise, this method is an O(<c>n</c> log <c>n</c> + <c>m</c> log <c>n</c>) operation, where <c>n</c> is the number of elements in
+        /// <paramref name="other"/> and <c>m</c> is <see cref="Count"/>.
         /// </remarks>
         public bool IsProperSupersetOf(IEnumerable<T> other)
         {
@@ -3168,22 +4373,76 @@ namespace J2N.Collections.Generic
             if (Count == 0)
                 return false;
 
-            if (other is ICollection c && c.Count == 0)
-                return true;
-
-            // another way for sorted sets
-            SortedSet<T>? asSorted = other as SortedSet<T>;
-            if (asSorted != null && HasEqualComparer(asSorted))
+            if (other is ICollection<T> genericCollection)
             {
-                if (asSorted.Count >= Count)
-                    return false;
-                SortedSet<T> pruned = GetViewBetween(asSorted.Min, asSorted.Max);
-                foreach (T item in asSorted)
+                if (genericCollection.Count == 0)
+                    return true;
+            }
+            else if (other is ICollection c)
+            {
+                if (c.Count == 0)
+                    return true;
+            }
+
+            if (other is INavigableCollection<T> navigableCollection)
+            {
+                if (ComparerEquals(Comparer, navigableCollection.Comparer))
                 {
-                    if (!pruned.Contains(item))
+                    if (navigableCollection.Count >= Count)
                         return false;
+
+                    return IsSupersetOfNavigableCollectionWithSameComparer(navigableCollection);
                 }
-                return true;
+            }
+            else if (other is IDistinctSortedCollection<T> distinctSortedCollection)
+            {
+                if (ComparerEquals(Comparer, distinctSortedCollection.Comparer))
+                {
+                    if (distinctSortedCollection.Count >= Count)
+                        return false;
+
+                    return IsSupersetOfEnumerableWithSameComparer(distinctSortedCollection);
+                }
+            }
+            else if (other is HashSet<T> hashSet)
+            {
+                if (ComparerEquals(Comparer, hashSet.EqualityComparer))
+                {
+                    if (hashSet.Count >= Count)
+                        return false;
+
+                    return IsSupersetOfEnumerableWithSameComparer(hashSet);
+                }
+            }
+            else if (other is OrderedHashSet<T> orderedHashSet)
+            {
+                if (ComparerEquals(Comparer, orderedHashSet.EqualityComparer))
+                {
+                    if (orderedHashSet.Count >= Count)
+                        return false;
+
+                    return IsSupersetOfEnumerableWithSameComparer(orderedHashSet);
+                }
+            }
+            else if (other is SCG.SortedSet<T> bclSortedSet)
+            {
+                if (ComparerEquals(Comparer, bclSortedSet.Comparer))
+                {
+                    if (bclSortedSet.Count >= Count)
+                        return false;
+
+                    return IsSupersetOfBclSortedSetWithSameComparer(bclSortedSet);
+                }
+            }
+            else if (other is SCG.HashSet<T> bclHashSet)
+            {
+                if (ComparerEquals(Comparer, bclHashSet.Comparer))
+                {
+                    if (bclHashSet.Count >= Count)
+                        return false;
+
+                    return IsSupersetOfEnumerableWithSameComparer(bclHashSet);
+                }
             }
 
             // Worst case: I mark every element in my set and see if I've counted all of them. O(M log N).
@@ -3204,9 +4463,13 @@ namespace J2N.Collections.Generic
         /// <remarks>
         /// This method ignores the order of elements and any duplicate elements in <paramref name="other"/>.
         /// <para/>
-        /// If the collection represented by other is a <see cref="SortedSet{T}"/> collection with the same
-        /// equality comparer as the current <see cref="SortedSet{T}"/> object, this method is an <c>O(log n)</c>
-        /// operation. Otherwise, this method is an <c>O(n + m)</c> operation, where <c>n</c> is the number of
+        /// If the collection represented by <paramref name="other"/> is a <see cref="SortedSet{T}"/>,
+        /// <see cref="SortedDictionary{TKey, TValue}.KeyCollection"/>, or <see cref="IDistinctSortedCollection{T}"/>
+        /// with the same equality comparer as the current <see cref="SortedSet{T}"/> object, this method is an O(log <c>n</c>)
+        /// operation. If the collection represented by <paramref name="other"/> is a <see cref="HashSet{T}"/>,
+        /// <see cref="OrderedHashSet{T}"/>, or <see cref="SCG.HashSet{T}"/> with the same equality comparer as the
+        /// current <see cref="SortedSet{T}"/> object, this method is an O(n) operation.
+        /// Otherwise, this method is an O(<c>n</c> + <c>m</c>) operation, where <c>n</c> is the number of
         /// elements in other and <c>m</c> is <see cref="Count"/>.
         /// </remarks>
         public bool SetEquals(IEnumerable<T> other)
@@ -3214,36 +4477,156 @@ namespace J2N.Collections.Generic
             if (other is null)
                 ThrowHelper.ThrowArgumentNullException(ExceptionArgument.other);
 
-            SortedSet<T>? asSorted = other as SortedSet<T>;
-            if (asSorted != null && HasEqualComparer(asSorted))
+            // Early bounds check:
+            // If this set is empty, other must be empty.
+            if (Count == 0)
             {
-                IEnumerator<T> mine = GetEnumerator();
-                IEnumerator<T> theirs = asSorted.GetEnumerator();
-                bool mineEnded = !mine.MoveNext();
-                bool theirsEnded = !theirs.MoveNext();
-                while (!mineEnded && !theirsEnded)
+                if (other is ICollection<T> genericCollection)
+                    return genericCollection!.Count == 0; // [!] asserted above
+                else if (other is ICollection c)
+                    return c!.Count == 0;
+            }
+
+            // A set is equal to itself.
+            if (other == this)
+                return true;
+
+            IDistinctSortedCollection<T>? distinctSortedCollection;
+            if (other is not SCG.SortedSet<T> otherSortedSet)
+                distinctSortedCollection = other as IDistinctSortedCollection<T>;
+            else
+                distinctSortedCollection = new BclSortedSetAdapter(otherSortedSet);
+
+            if (distinctSortedCollection != null)
+            {
+                IComparer<T> comparer = Comparer;
+                if (ComparerEquals(comparer, distinctSortedCollection.Comparer))
                 {
-                    if (Comparer.Compare(mine.Current, theirs.Current) != 0)
+                    IEnumerator<T> mine = GetEnumerator();
+                    IEnumerator<T> theirs = distinctSortedCollection.GetEnumerator();
+                    bool mineEnded = !mine.MoveNext();
+                    bool theirsEnded = !theirs.MoveNext();
+                    while (!mineEnded && !theirsEnded)
                     {
-                        return false;
+                        if (comparer.Compare(mine.Current, theirs.Current) != 0)
+                        {
+                            return false;
+                        }
+                        mineEnded = !mine.MoveNext();
+                        theirsEnded = !theirs.MoveNext();
                     }
-                    mineEnded = !mine.MoveNext();
-                    theirsEnded = !theirs.MoveNext();
+                    return mineEnded && theirsEnded;
                 }
-                return mineEnded && theirsEnded;
+            }
+            else if (other is ISortedCollection<T> sortedCollection)
+            {
+                IComparer<T> comparer = Comparer;
+                if (ComparerEquals(comparer, sortedCollection.Comparer))
+                    return SetEqualsSortedNonDistinctCollectionWithSameComparer(sortedCollection, comparer);
+            }
+            else if (other is HashSet<T> hashSet)
+            {
+                if (ComparerEquals(Comparer, hashSet.EqualityComparer))
+                    return SetEqualsDistinctCollectionWithSameComparer(hashSet);
+            }
+            else if (other is OrderedHashSet<T> orderedHashSet)
+            {
+                if (ComparerEquals(Comparer, orderedHashSet.EqualityComparer))
+                    return SetEqualsDistinctCollectionWithSameComparer(orderedHashSet);
+            }
+            else if (other is SCG.HashSet<T> bclHashSet)
+            {
+                if (ComparerEquals(Comparer, bclHashSet.Comparer))
+                    return SetEqualsDistinctCollectionWithSameComparer(bclHashSet);
             }
 
             // Worst case: I mark every element in my set and see if I've counted all of them. O(size of the other collection).
-            ElementCount result = CheckUniqueAndUnfoundElements(other, true);
+            ElementCount result = CheckUniqueAndUnfoundElements(other, returnIfUnfound: true);
             return result.UniqueCount == Count && result.UnfoundCount == 0;
+        }
+
+        private bool SetEqualsSortedNonDistinctCollectionWithSameComparer(ISortedCollection<T> other, IComparer<T> comparer)
+        {
+            Debug.Assert(other != null);
+
+            IEnumerator<T> mine = GetEnumerator();
+            IEnumerator<T> theirs = other!.GetEnumerator(); // [!] asserted above
+
+            bool mineEnded = !mine.MoveNext();
+            bool theirsEnded = !theirs.MoveNext();
+
+            Debug.Assert(!mineEnded); // Count > 0 guarantees this
+
+            int matched = 0;
+            bool hasPrevOther = false;
+            T prevOther = default!;
+
+            while (!mineEnded && !theirsEnded)
+            {
+                T currentOther = theirs.Current;
+
+                // Collapse duplicates in 'other' using the comparer
+                if (hasPrevOther && comparer.Compare(prevOther, currentOther) == 0)
+                {
+                    theirsEnded = !theirs.MoveNext();
+                    continue;
+                }
+
+                int cmp = comparer.Compare(mine.Current, currentOther);
+                if (cmp != 0)
+                    return false;
+
+                matched++;
+
+                mineEnded = !mine.MoveNext();
+
+                prevOther = currentOther;
+                hasPrevOther = true;
+                theirsEnded = !theirs.MoveNext();
+            }
+
+            // If we still have items in 'other', they must all be duplicates
+            while (!theirsEnded)
+            {
+                if (!hasPrevOther || comparer.Compare(prevOther, theirs.Current) != 0)
+                    return false;
+
+                theirsEnded = !theirs.MoveNext();
+            }
+
+            // Must have consumed all of 'mine' and matched exactly Count elements
+            return mineEnded && matched == Count;
+        }
+
+        private bool SetEqualsDistinctCollectionWithSameComparer(ICollection<T> collection)
+        {
+            Debug.Assert(collection != null);
+
+            if (Count != collection!.Count) // [!] asserted above
+                return false;
+
+            foreach (T item in this)
+            {
+                if (!collection.Contains(item))
+                    return false;
+            }
+
+            return true;
         }
 
         /// <summary>
         /// Determines whether the current <see cref="SortedSet{T}"/> object and a specified collection share common elements.
         /// </summary>
         /// <param name="other">The collection to compare to the current <see cref="SortedSet{T}"/> object.</param>
-        /// <returns><c>true</c> if the <see cref="SortedSet{T}"/> object and <paramref name="other"/> share at
-        /// least one common element; otherwise, <c>false</c>.</returns>
+        /// <returns><see langword="true"/> if the <see cref="SortedSet{T}"/> object and <paramref name="other"/> share at
+        /// least one common element; otherwise, <see langword="false"/>.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="other"/> is <see langword="null"/>.</exception>
+        /// <remarks>
+        /// Any duplicate elements in <paramref name="other"/> are ignored.
+        /// <para/>
+        /// This method is an O(<c>n</c> log <c>m</c>) operation, wheer <c>m</c> is <see cref="Count"/> and <c>n</c> is the
+        /// number of elements in <paramref name="other"/>.
+        /// </remarks>
         public bool Overlaps(IEnumerable<T> other)
         {
             if (other is null)
@@ -3252,13 +4635,37 @@ namespace J2N.Collections.Generic
             if (Count == 0)
                 return false;
 
-            if (other is ICollection<T> c && c.Count == 0)
-                return false;
-
-            SortedSet<T>? asSorted = other as SortedSet<T>;
-            if (asSorted != null && HasEqualComparer(asSorted) && (comparer.Compare(Min!, asSorted.Max!) > 0 || comparer.Compare(Max!, asSorted.Min!) < 0))
+            if (other is ICollection<T> genericCollection)
             {
-                return false;
+                if (genericCollection.Count == 0)
+                    return false;
+            }
+            else if (other is ICollection c)
+            {
+                if (c.Count == 0)
+                    return false;
+            }
+
+            if (other is INavigableCollection<T> navigableCollection)
+            {
+                IComparer<T> comparer = Comparer;
+                if (ComparerEquals(comparer, navigableCollection.Comparer) &&
+                    (!navigableCollection.TryGetLast(out T? otherLast) || 
+                    !navigableCollection.TryGetFirst(out T? otherFirst) ||
+                    comparer.Compare(MinInternal!, otherLast!) > 0 ||
+                    comparer.Compare(MaxInternal!, otherFirst!) < 0))
+                {
+                    return false;
+                }
+            }
+            else if (other is SCG.SortedSet<T> bclSortedSet)
+            {
+                IComparer<T> comparer = Comparer;
+                if (ComparerEquals(comparer, bclSortedSet.Comparer) &&
+                    (comparer.Compare(MinInternal!, bclSortedSet.Max!) > 0 || comparer.Compare(MaxInternal!, bclSortedSet.Min!) < 0))
+                {
+                    return false;
+                }
             }
 
             foreach (T item in other)
@@ -3295,7 +4702,7 @@ namespace J2N.Collections.Generic
         /// An earlier implementation used delegates to perform these checks rather than returning
         /// an ElementCount struct; however this was changed due to the perf overhead of delegates.
         /// </summary>
-        private unsafe ElementCount CheckUniqueAndUnfoundElements(IEnumerable<T> other, bool returnIfUnfound)
+        internal unsafe ElementCount CheckUniqueAndUnfoundElements(IEnumerable<T> other, bool returnIfUnfound)
         {
             ElementCount result;
 
@@ -3393,6 +4800,48 @@ namespace J2N.Collections.Generic
 
         #endregion
 
+        #region INavigableCollection<T> members
+
+        IComparer<T> ISortedCollection<T>.Comparer => Comparer;
+
+        bool INavigableCollection<T>.TryGetPredecessor([AllowNull] T item, [MaybeNullWhen(false)] out T result)
+            => TryGetPredecessor(item, out result);
+
+        bool INavigableCollection<T>.TryGetSuccessor([AllowNull] T item, [MaybeNullWhen(false)] out T result)
+            => TryGetSuccessor(item, out result);
+
+        bool INavigableCollection<T>.TryGetFloor([AllowNull] T item, [MaybeNullWhen(false)] out T result)
+            => TryGetFloor(item, out result);
+
+        bool INavigableCollection<T>.TryGetCeiling([AllowNull] T item, [MaybeNullWhen(false)] out T result)
+            => TryGetCeiling(item, out result);
+
+        IEnumerable<T> INavigableCollection<T>.Reverse()
+            => Reverse();
+
+        INavigableCollection<T> INavigableCollection<T>.GetView([AllowNull] T fromItem, [AllowNull] T toItem)
+            => GetView(fromItem, toItem);
+
+        INavigableCollection<T> INavigableCollection<T>.GetView([AllowNull] T fromItem, bool fromInclusive, [AllowNull] T toItem, bool toInclusive)
+            => GetView(fromItem, fromInclusive, toItem, toInclusive);
+
+        INavigableCollection<T> INavigableCollection<T>.GetViewBefore([AllowNull] T toItem)
+            => GetViewBefore(toItem);
+
+        INavigableCollection<T> INavigableCollection<T>.GetViewBefore([AllowNull] T toItem, bool inclusive)
+            => GetViewBefore(toItem, inclusive);
+
+        INavigableCollection<T> INavigableCollection<T>.GetViewAfter([AllowNull] T fromItem)
+            => GetViewAfter(fromItem);
+
+        INavigableCollection<T> INavigableCollection<T>.GetViewAfter([AllowNull] T fromItem, bool inclusive)
+            => GetViewAfter(fromItem, inclusive);
+
+        INavigableCollection<T> INavigableCollection<T>.GetViewDescending()
+            => GetViewDescending();
+
+        #endregion INavigableCollection<T> members
+
         #region ISorted members
 
         /// <summary>
@@ -3402,26 +4851,14 @@ namespace J2N.Collections.Generic
         /// If the <see cref="SortedSet{T}"/> has no elements, then the <see cref="Min"/> property returns
         /// the default value of <typeparamref name="T"/>.
         /// </remarks>
+        [Obsolete("This property is deprecated because the name does not match the behavior in descending order views. Use TryGetFirst(out T) instead.")]
+        [EditorBrowsable(EditorBrowsableState.Never)]
         public T? Min => MinInternal;
 
-        internal virtual T? MinInternal
-        {
-            get
-            {
-                if (root == null)
-                {
-                    return default!;
-                }
-
-                Node current = root;
-                while (current.Left != null)
-                {
-                    current = current.Left;
-                }
-
-                return current.Item;
-            }
-        }
+        /// <summary>
+        /// Indicates the lowest logical value (which may be reversed)
+        /// </summary>
+        internal virtual T? MinInternal => LowerValue;
 
         /// <summary>
         /// Gets the maximum value in the <see cref="SortedSet{T}"/>, as defined by the comparer.
@@ -3430,35 +4867,110 @@ namespace J2N.Collections.Generic
         /// If the <see cref="SortedSet{T}"/> has no elements, then the <see cref="Max"/> property returns
         /// the default value of <typeparamref name="T"/>.
         /// </remarks>
+        [Obsolete("This property is deprecated because the name does not match the behavior in descending order views. Use TryGetLast(out T) instead.")]
+        [EditorBrowsable(EditorBrowsableState.Never)]
         public T? Max => MaxInternal;
 
-        internal virtual T? MaxInternal
+        /// <summary>
+        /// Indicates the maximum logical value (which may be reversed)
+        /// </summary>
+        internal virtual T? MaxInternal => UpperValue;
+
+        /// <summary>
+        /// Gets the first (lowest) value in the <see cref="SortedSet{T}"/>, as defined by the comparer.
+        /// </summary>
+        /// <param name="result">Upon successful return, contains the first (lowest) value.</param>
+        /// <returns><see langword="true"/> if a first value exists; otherwise, <see langword="false"/>.</returns>
+        /// <remarks>
+        /// This corresponds to the <c>first()</c> method in the JDK.
+        /// </remarks>
+        public bool TryGetFirst([MaybeNullWhen(false)] out T result) => DoTryGetFirst(out result);
+
+        internal virtual bool DoTryGetFirst([MaybeNullWhen(false)] out T result)
         {
-            get
+            if (count > 0)
             {
-                if (root == null)
-                {
-                    return default!;
-                }
-
-                Node current = root;
-                while (current.Right != null)
-                {
-                    current = current.Right;
-                }
-
-                return current.Item;
+                result = MinInternal!;
+                return true;
             }
+            result = default;
+            return false;
+        }
+
+        /// <summary>
+        /// Gets the last (highest) value in the <see cref="SortedSet{T}"/>, as defined by the comparer.
+        /// </summary>
+        /// <param name="result">Upon successful return, contains the last (highest) value.</param>
+        /// <returns><see langword="true"/> if a last value exists; otherwise, <see langword="false"/>.</returns>
+        /// <remarks>
+        /// This corresponds to the <c>last()</c> method in the JDK.
+        /// </remarks>
+        public bool TryGetLast([MaybeNullWhen(false)] out T result) => DoTryGetLast(out result);
+
+        internal virtual bool DoTryGetLast([MaybeNullWhen(false)] out T result)
+        {
+            if (count > 0)
+            {
+                result = MaxInternal!;
+                return true;
+            }
+            result = default;
+            return false;
+        }
+
+        /// <summary>
+        /// Removes the first (lowest) value in the <see cref="SortedSet{T}"/>, as defined by the comparer.
+        /// </summary>
+        /// <param name="value">The value of the element before it is removed.</param>
+        /// <returns><see langword="true"/>  if the element is successfully removed; otherwise, <see langword="false"/>.</returns>
+        /// <remarks>
+        /// This corresponds to the <c>pollFirst()</c> method in the JDK.
+        /// </remarks>
+        public bool RemoveFirst([MaybeNullWhen(false)] out T value) => DoRemoveFirst(out value);
+
+        internal virtual bool DoRemoveFirst([MaybeNullWhen(false)] out T value)
+        {
+            if (count == 0)
+            {
+                value = default;
+                return false;
+            }
+
+            return DoRemove(MinInternal!, out value);
+        }
+
+        /// <summary>
+        /// Removes the last (highest) value in the <see cref="SortedSet{T}"/>, as defined by the comparer.
+        /// </summary>
+        /// <param name="value">The value of the element before it is removed.</param>
+        /// <returns><see langword="true"/>  if the element is successfully removed; otherwise, <see langword="false"/>.</returns>
+        /// <remarks>
+        /// This corresponds to the <c>pollLast()</c> method in the JDK.
+        /// </remarks>
+        public bool RemoveLast([MaybeNullWhen(false)] out T value) => DoRemoveLast(out value);
+
+        internal virtual bool DoRemoveLast([MaybeNullWhen(false)] out T value)
+        {
+            if (count == 0)
+            {
+                value = default;
+                return false;
+            }
+
+            return DoRemove(MaxInternal!, out value);
         }
 
         /// <summary>
         /// Returns an <see cref="IEnumerable{T}"/> that iterates over the
         /// <see cref="SortedSet{T}"/> in reverse order.
         /// </summary>
-        /// <returns>An enumerator that iterates over the <see cref="SortedSet{T}"/> in reverse order.</returns>
+        /// <returns>An enumerable that iterates over the <see cref="SortedSet{T}"/> in reverse order.</returns>
+        /// <remarks>
+        /// This corresponds roughly to the <c>descendingIterator()</c> method in the JDK.
+        /// </remarks>
         public IEnumerable<T> Reverse()
         {
-            Enumerator e = new Enumerator(this, reverse: true);
+            Enumerator e = new Enumerator(this, reverse: !IsReversed);
             while (e.MoveNext())
             {
                 yield return e.Current;
@@ -3485,18 +4997,12 @@ namespace J2N.Collections.Generic
         /// <see cref="SortedSet{T}"/>, but provides a window into the underlying <see cref="SortedSet{T}"/> itself.
         /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
         /// <para/>
-        /// If this method is called on a view, it will inherit the <c>lowerValueInclusive</c> and <c>upperValueInclusive</c>
-        /// behavior of the view. To override this behavior, call the <see cref="GetViewBetween(T, bool, T, bool)"/> overload
-        /// instead.
+        /// This corresponds to the <c>subSet()</c> method in the JDK.
         /// </remarks>
+        [Obsolete("This method is deprecated because the argument names do not match the behavior in descending order views. Use GetView(T, T) instead.")]
+        [EditorBrowsable(EditorBrowsableState.Never)]
         public virtual SortedSet<T> GetViewBetween(T? lowerValue, T? upperValue)
-        {
-            if (Comparer.Compare(lowerValue!, upperValue!) > 0)
-            {
-                ThrowHelper.ThrowArgumentException(ExceptionResource.SortedSet_LowerValueGreaterThanUpperValue, ExceptionArgument.lowerValue);
-            }
-            return new TreeSubSet(this, lowerValue, LowerBoundInclusive, upperValue, UpperBoundInclusive, true, true);
-        }
+            => DoGetView(lowerValue, fromInclusive: true, ExceptionArgument.lowerValue, upperValue, toInclusive: true, ExceptionArgument.upperValue);
 
         /// <summary>
         /// Returns a view of a subset in a <see cref="SortedSet{T}"/>.
@@ -3522,14 +5028,185 @@ namespace J2N.Collections.Generic
         /// and <paramref name="upperValueInclusive"/>. This method does not copy elements from the
         /// <see cref="SortedSet{T}"/>, but provides a window into the underlying <see cref="SortedSet{T}"/> itself.
         /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
+        /// <para/>
+        /// This corresponds to the <c>subSet()</c> method in the JDK.
         /// </remarks>
+        [Obsolete("This method is deprecated because the argument names do not match the behavior in descending order views. Use GetView(T, bool, T, bool) instead.")]
+        [EditorBrowsable(EditorBrowsableState.Never)]
         public virtual SortedSet<T> GetViewBetween(T? lowerValue, bool lowerValueInclusive, T? upperValue, bool upperValueInclusive)
+            => DoGetView(lowerValue, fromInclusive: lowerValueInclusive, ExceptionArgument.lowerValue, upperValue, toInclusive: upperValueInclusive, ExceptionArgument.upperValue);
+
+        /// <summary>
+        /// Returns a view of a subset in a <see cref="SortedSet{T}"/>.
+        /// <para/>
+        /// Usage Note: In Java, the <paramref name="toItem"/> of TreeSet.subSet() is exclusive. To match the behavior, call
+        /// <see cref="GetView(T, bool, T, bool)"/>, setting <c>fromInclusive</c> to <see langword="true"/>
+        /// and <c>toInclusive</c> to <see langword="false"/>.
+        /// </summary>
+        /// <param name="fromItem">The first desired value in the view (lowest in ascending order, highest in descending order).</param>
+        /// <param name="toItem">The last desired value in the view (highest in ascending order, lowest in descending order).</param>
+        /// <returns>A subset view that contains only the values in the specified range.</returns>
+        /// <exception cref="ArgumentException"><paramref name="fromItem"/> is after <paramref name="toItem"/>
+        /// in the current view order according to the comparer.</exception>
+        /// <exception cref="ArgumentOutOfRangeException">A tried operation on the view was outside the range
+        /// specified by <paramref name="fromItem"/> and <paramref name="toItem"/>.</exception>
+        /// <remarks>
+        /// This method returns a view of the range of elements that fall between <paramref name="fromItem"/> and
+        /// <paramref name="toItem"/> (inclusive), as defined by the current view order and the comparer.
+        /// This method does not copy elements from the <see cref="SortedSet{T}"/>, but provides a window into the
+        /// underlying <see cref="SortedSet{T}"/> itself.
+        /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
+        /// <para/>
+        /// This corresponds to the <c>subSet()</c> method in the JDK.
+        /// </remarks>
+        public SortedSet<T> GetView([AllowNull] T fromItem, [AllowNull] T toItem)
+            => DoGetView(fromItem, fromInclusive: true, fromArgumentName: ExceptionArgument.fromItem, toItem, toInclusive: true, toArgumentName: ExceptionArgument.toItem);
+
+        /// <summary>
+        /// Returns a view of a subset in a <see cref="SortedSet{T}"/>.
+        /// <para/>
+        /// Usage Note: To match the behavior of the JDK, call this overload with <paramref name="fromInclusive"/>
+        /// set to <see langword="true"/> and <paramref name="toInclusive"/> set to <see langword="false"/>.
+        /// </summary>
+        /// <param name="fromItem">The first desired value in the view (lowest in ascending order, highest in descending order).</param>
+        /// <param name="fromInclusive">If <see langword="true"/>, <paramref name="fromItem"/> will be included in the range;
+        /// otherwise, it is an exclusive bound.</param>
+        /// <param name="toItem">The last desired value in the view (highest in ascending order, lowest in descending order).</param>
+        /// <param name="toInclusive">If <see langword="true"/>, <paramref name="toItem"/> will be included in the range;
+        /// otherwise, it is an exclusive bound.</param>
+        /// <returns>A subset view that contains only the values in the specified range.</returns>
+        /// <exception cref="ArgumentException"><paramref name="fromItem"/> is after <paramref name="toItem"/>
+        /// in the current view order according to the comparer.</exception>
+        /// <exception cref="ArgumentOutOfRangeException">A tried operation on the view was outside the range
+        /// specified by <paramref name="fromItem"/> and <paramref name="toItem"/>.</exception>
+        /// <remarks>
+        /// This method returns a view of the range of elements that fall between <paramref name="fromItem"/> and
+        /// <paramref name="toItem"/>, as defined by the current view order and the comparer. Each bound may either be inclusive
+        /// (<see langword="true"/>) or exclusive (<see langword="false"/>) depending on the values of <paramref name="fromInclusive"/>
+        /// and <paramref name="toInclusive"/>. This method does not copy elements from the
+        /// <see cref="SortedSet{T}"/>, but provides a window into the underlying <see cref="SortedSet{T}"/> itself.
+        /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
+        /// <para/>
+        /// This corresponds to the <c>subSet()</c> method in the JDK.
+        /// </remarks>
+        public SortedSet<T> GetView([AllowNull] T fromItem, bool fromInclusive, [AllowNull] T toItem, bool toInclusive)
+            => DoGetView(fromItem, fromInclusive, ExceptionArgument.fromItem, toItem, toInclusive, ExceptionArgument.toItem);
+
+        internal virtual SortedSet<T> DoGetView([AllowNull] T fromItem, bool fromInclusive, ExceptionArgument fromArgumentName, [AllowNull] T toItem, bool toInclusive, ExceptionArgument toArgumentName)
         {
-            if (Comparer.Compare(lowerValue!, upperValue!) > 0)
+            // J2N: Use forward-only comparer here, since this method requires the paramters to be passed in value
+            // order regardless of whether the set is reversed or not.
+            if (comparer.Compare(fromItem!, toItem!) > 0)
             {
-                ThrowHelper.ThrowArgumentException(ExceptionResource.SortedSet_LowerValueGreaterThanUpperValue, ExceptionArgument.lowerValue);
+                ThrowHelper.ThrowArgumentException_SortedSet_LowerValueGreaterThanUpperValue(fromArgumentName, toArgumentName);
             }
-            return new TreeSubSet(this, lowerValue, lowerValueInclusive, upperValue, upperValueInclusive, true, true);
+            return new TreeSubSet(UnderlyingSet, fromItem, lowerBoundInclusive: fromInclusive, toItem, upperBoundInclusive: toInclusive, true, true, IsReversed);
+        }
+
+        /// <summary>
+        /// Returns the view of a subset in a <see cref="SortedSet{T}"/> with no lower bound.
+        /// <para/>
+        /// Usage Note: To match the default behavior of the JDK, call the <see cref="GetViewBefore(T, bool)"/>
+        /// overload with <c>inclusive</c> set to <see langword="false"/>.
+        /// </summary>
+        /// <param name="toItem">The last desired value in the view (highest in ascending order, lowest in descending order).</param>
+        /// <returns>A subset view that contains only the values in the specified range.</returns>
+        /// <remarks>
+        /// This method returns a view of the range of elements that fall before <paramref name="toItem"/>
+        /// (inclusive), as defined by the current view order and comparer. This method does not copy elements from the
+        /// <see cref="SortedSet{T}"/>, but provides a window into the underlying <see cref="SortedSet{T}"/> itself.
+        /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
+        /// <para/>
+        /// This corresponds to the <c>headSet()</c> method in the JDK.
+        /// </remarks>
+        public SortedSet<T> GetViewBefore([AllowNull] T toItem)
+            => DoGetViewBefore(toItem, inclusive: true, ExceptionArgument.toItem);
+
+        /// <summary>
+        /// Returns the view of a subset in a <see cref="SortedSet{T}"/> with no lower bound.
+        /// <para/>
+        /// Usage Note: To match the default behavior of the JDK, call this overload with <paramref name="inclusive"/>
+        /// set to <see langword="false"/>.
+        /// </summary>
+        /// <param name="toItem">The last desired value in the view (highest in ascending order, lowest in descending order).</param>
+        /// <param name="inclusive">If <see langword="true"/>, <paramref name="toItem"/> will be included in the range;
+        /// otherwise, it is an exclusive upper bound.</param>
+        /// <returns>
+        /// This method returns a view of the range of elements that fall before <paramref name="toItem"/>, as defined
+        /// by the current view order and comparer. The upper bound may either be inclusive (<see langword="true"/>)
+        /// or exclusive (<see langword="false"/>) depending on the value of <paramref name="inclusive"/>.
+        /// This method does not copy elements from the <see cref="SortedSet{T}"/>, but provides a window into
+        /// the underlying <see cref="SortedSet{T}"/> itself.
+        /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
+        /// <para/>
+        /// This corresponds to the <c>headSet()</c> method in the JDK.
+        /// </returns>
+        public SortedSet<T> GetViewBefore([AllowNull] T toItem, bool inclusive)
+            => DoGetViewBefore(toItem, inclusive, ExceptionArgument.toItem);
+
+        internal virtual SortedSet<T> DoGetViewBefore([AllowNull] T toItem, bool inclusive, ExceptionArgument toArgumentName)
+        {
+            return new TreeSubSet(UnderlyingSet, default, true, toItem, inclusive, false, true, IsReversed);
+        }
+
+        /// <summary>
+        /// Returns a view of a subset in a <see cref="SortedSet{T}"/> with no upper bound.
+        /// </summary>
+        /// <param name="fromItem">The first desired value in the view (lowest in ascending order, highest in descending order).</param>
+        /// <returns>A subset view that contains only the values in the specified range.</returns>
+        /// <remarks>
+        /// This method returns a view of the range of elements that fall after <paramref name="fromItem"/>
+        /// (inclusive), as defined by the current view order and comparer. This method does not copy elements from the
+        /// <see cref="SortedSet{T}"/>, but provides a window into the underlying <see cref="SortedSet{T}"/> itself.
+        /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
+        /// <para/>
+        /// This corresponds to the <c>tailSet()</c> method in the JDK.
+        /// </remarks>
+        public SortedSet<T> GetViewAfter([AllowNull] T fromItem)
+            => DoGetViewAfter(fromItem, inclusive: true, ExceptionArgument.fromItem);
+
+        /// <summary>
+        /// Returns a view of a subset in a <see cref="SortedSet{T}"/> with no upper bound.
+        /// </summary>
+        /// <param name="fromItem">The first desired value in the view (lowest in ascending order, highest in descending order).</param>
+        /// <param name="inclusive">If <see langword="true"/>, <paramref name="fromItem"/> will be included in the range;
+        /// otherwise, it is an exclusive lower bound.</param>
+        /// <returns>A subset view that contains only the values in the specified range.</returns>
+        /// <remarks>
+        /// This method returns a view of the range of elements that fall after <paramref name="fromItem"/>, as defined
+        /// by the current view order and comparer. The lower bound may either be inclusive (<see langword="true"/>)
+        /// or exclusive (<see langword="false"/>) depending on the value of <paramref name="inclusive"/>.
+        /// This method does not copy elements from the <see cref="SortedSet{T}"/>, but provides a window into
+        /// the underlying <see cref="SortedSet{T}"/> itself.
+        /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
+        /// <para/>
+        /// This corresponds to the <c>tailSet()</c> method in the JDK.
+        /// </remarks>
+        public SortedSet<T> GetViewAfter([AllowNull] T fromItem, bool inclusive)
+            => DoGetViewAfter(fromItem, inclusive, ExceptionArgument.fromItem);
+
+        internal virtual SortedSet<T> DoGetViewAfter([AllowNull] T fromItem, bool inclusive, ExceptionArgument fromArgumentName)
+        {
+            return new TreeSubSet(UnderlyingSet, fromItem, inclusive, default, true, true, false, IsReversed);
+        }
+
+        /// <summary>
+        /// Returns a reverse order view of the elements of the current <see cref="SortedSet{T}"/>.
+        /// </summary>
+        /// <returns>A view that contains the values of the current <see cref="SortedSet{T}"/> in reverse order.</returns>
+        /// <remarks>
+        /// This method returns a reverse order view of the range of elements of this <see cref="SortedSet{T}"/>, as defined
+        /// by the comparer.This method does not copy elements from the <see cref="SortedSet{T}"/>, but provides a window into
+        /// the underlying <see cref="SortedSet{T}"/> itself.
+        /// You can make changes in both the view and in the underlying <see cref="SortedSet{T}"/>.
+        /// <para/>
+        /// This corresponds to the <c>descendingSet()</c> method in the JDK.
+        /// </remarks>
+        public SortedSet<T> GetViewDescending()
+        {
+            // J2N: Inherit the settings from the current view.
+            // These are defaulted in SortedSet<T> to the full range with inclusive bounds, but may be different for existing views.
+            return new TreeSubSet(UnderlyingSet, LowerBound, LowerBoundInclusive, UpperBound, UpperBoundInclusive, HasLowerBound, HasUpperBound, !IsReversed);
         }
 
 #if DEBUG

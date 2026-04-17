@@ -687,6 +687,12 @@ namespace J2N
             throw new ArgumentException(SR.Format(SR.Argument_MustNotBeThis, GetArgumentName(argument)));
         }
 
+        [DoesNotReturn]
+        internal static void ThrowArgumentException_SortedSet_LowerValueGreaterThanUpperValue(ExceptionArgument lowerArgumentName, ExceptionArgument upperArgumentName)
+        {
+            throw new ArgumentException(SR.Format(SR.SortedSet_LowerValueGreaterThanUpperValue, GetArgumentName(upperArgumentName)), GetArgumentName(lowerArgumentName));
+        }
+
         //[DoesNotReturn]
         //internal static void ThrowArgumentException_InvalidHandle(string? paramName)
         //{
@@ -1104,6 +1110,10 @@ namespace J2N
                     return "fnUpdate";
                 case ExceptionArgument.formatProvider:
                     return "formatProvider";
+                case ExceptionArgument.fromItem:
+                    return "fromItem";
+                case ExceptionArgument.fromKey:
+                    return "fromKey";
                 case ExceptionArgument.hashSize:
                     return "hashSize";
                 case ExceptionArgument.index:
@@ -1208,6 +1218,10 @@ namespace J2N
                     return "text";
                 case ExceptionArgument.threadStart:
                     return "threadStart";
+                case ExceptionArgument.toItem:
+                    return "toItem";
+                case ExceptionArgument.toKey:
+                    return "toKey";
                 case ExceptionArgument.toStringFormatProvider:
                     return "toStringFormatProvider";
                 case ExceptionArgument.type:
@@ -1601,8 +1615,6 @@ namespace J2N
                     return SR.LurchTable_NeedLimitIntMaxValue;
                 case ExceptionResource.NotSupported_SerializationDeprecated:
                     return SR.NotSupported_SerializationDeprecated;
-                case ExceptionResource.SortedSet_LowerValueGreaterThanUpperValue:
-                    return SR.SortedSet_LowerValueGreaterThanUpperValue;
                 case ExceptionResource.Serialization_MissingValues:
                     return SR.Serialization_MissingValues;
                 case ExceptionResource.Serialization_InvalidOnDeser:
@@ -1652,6 +1664,8 @@ namespace J2N
         fnCreate,
         fnUpdate,
         formatProvider,
+        fromKey,
+        fromItem,
         hashSize,
         index,
         index1,
@@ -1704,7 +1718,9 @@ namespace J2N
         targetType,
         text,
         threadStart,
+        toKey,
         toStringFormatProvider,
+        toItem,
         type,
         uiCulture,
         upperValue,
@@ -1914,7 +1930,6 @@ namespace J2N
         InvalidOperation_ViewFailedVersion,
         LurchTable_NeedLimitIntMaxValue,
         NotSupported_SerializationDeprecated,
-        SortedSet_LowerValueGreaterThanUpperValue,
         Serialization_MissingValues,
         Serialization_InvalidOnDeser,
     }

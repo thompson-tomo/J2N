@@ -12,6 +12,7 @@ using System.Reflection;
 using System.Runtime.Serialization.Formatters.Binary;
 using Xunit;
 using SCG = System.Collections.Generic;
+using static J2N.Collections.Tests.NavigableCollectionHelper;
 
 namespace J2N.Collections.Tests
 {
@@ -22,9 +23,35 @@ namespace J2N.Collections.Tests
     {
         #region ISet<T> Helper Methods
 
+        // J2N: Added virtual properties to control inclusivity of bounds in GetView tests
+        private bool? _isDescending;
+        protected bool IsDescending => _isDescending ??= IsReverseIComparer(GetIComparer() ?? Comparer<T>.Default);
+
+        protected virtual bool LowerBoundInclusive => true;
+        protected virtual bool UpperBoundInclusive => true;
+
+        protected virtual bool FirstInclusive => IsDescending ? UpperBoundInclusive : LowerBoundInclusive;
+
+        protected virtual bool LastInclusive => IsDescending ? LowerBoundInclusive : UpperBoundInclusive;
+
         protected override SCG.ISet<T> GenericISetFactory()
         {
             return new SortedSet<T>();
+        }
+
+        protected static bool IsReverseIComparer(SCG.IComparer<T> comparer)
+        {
+            return comparer is ReverseComparer<T>;
+        }
+
+        private SCG.IComparer<T> GetForwardIComparer()
+        {
+            SCG.IComparer<T> comparer = GetIComparer() ?? Comparer<T>.Default;
+
+            if (comparer is ReverseComparer<T> reverse)
+                return reverse.InnerComparer;
+
+            return comparer;
         }
 
         #endregion
@@ -113,7 +140,50 @@ namespace J2N.Collections.Tests
 
         #endregion
 
+        #region First and Last
+
+        // J2N: Added TryGetFirst and TryGetLast methods to replace Min and Max
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_FirstAndLast(int setLength)
+        {
+            SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+            SortedSet<T> descendingSet = set.GetViewDescending();
+            if (setLength > 0)
+            {
+                List<T> expected = set.ToList();
+                expected.Sort(GetIComparer());
+
+                AssertFirstLastMatch(expected, set, setLength);
+
+                expected.Reverse();
+
+                AssertFirstLastMatch(expected, descendingSet, setLength);
+            }
+            else
+            {
+                Assert.False(set.TryGetFirst(out T value));
+                Assert.Equal(default(T), value);
+
+                Assert.False(set.TryGetLast(out value));
+                Assert.Equal(default(T), value);
+            }
+
+            static void AssertFirstLastMatch(List<T> expected, SortedSet< T> set, int setLength)
+            {
+                Assert.True(set.TryGetFirst(out T value));
+                Assert.Equal(expected[0], value);
+
+                Assert.True(set.TryGetLast(out value));
+                Assert.Equal(expected[setLength - 1], value);
+            }
+        }
+
+        #endregion
+
         #region GetViewBetween
+
+        // J2N: GetViewBetween has been superseded by GetView because the BCL named the parameters wrong for descending views.
 
         [Theory]
         [MemberData(nameof(ValidCollectionSizes))]
@@ -125,8 +195,73 @@ namespace J2N.Collections.Tests
                 T firstElement = set.ElementAt(0);
                 T lastElement = set.ElementAt(setLength - 1);
                 SortedSet<T> view = set.GetViewBetween(firstElement, lastElement);
-                Assert.Equal(setLength, view.Count);
-                Assert.True(set.SetEquals(view));
+                List<T> expected = GetViewExpected(set, firstElement, true, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBetween_Inclusive_Inclusive_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetViewBetween(firstElement, true, lastElement, true);
+                List<T> expected = GetViewExpected(set, firstElement, true, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBetween_Inclusive_Exclusive_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetViewBetween(firstElement, true, lastElement, false);
+                List<T> expected = GetViewExpected(set, firstElement, true, lastElement, false, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBetween_Exclusive_Inclusive_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetViewBetween(firstElement, false, lastElement, true);
+                List<T> expected = GetViewExpected(set, firstElement, false, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBetween_Exclusive_Exclusive_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetViewBetween(firstElement, false, lastElement, false);
+                List<T> expected = GetViewExpected(set, firstElement, false, lastElement, false, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
             }
         }
 
@@ -136,19 +271,77 @@ namespace J2N.Collections.Tests
         {
             if (setLength >= 3)
             {
-                SCG.IComparer<T> comparer = GetIComparer() ?? Comparer<T>.Default;
                 SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
                 T firstElement = set.ElementAt(1);
                 T lastElement = set.ElementAt(setLength - 2);
-
-                SCG.List<T> expected = new SCG.List<T>(setLength - 2);
-                foreach (T value in set)
-                    if (comparer.Compare(value, firstElement) >= 0 && comparer.Compare(value, lastElement) <= 0)
-                        expected.Add(value);
-
                 SortedSet<T> view = set.GetViewBetween(firstElement, lastElement);
+                List<T> expected = GetViewExpected(set, firstElement, true, lastElement, true, GetIComparer());
                 Assert.Equal(expected.Count, view.Count);
-                Assert.True(view.SetEquals(expected));
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBetween_Inclusive_Inclusive_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(1);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetViewBetween(firstElement, true, lastElement, true);
+                List<T> expected = GetViewExpected(set, firstElement, true, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBetween_Inclusive_Exclusive_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(1);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetViewBetween(firstElement, true, lastElement, false);
+                List<T> expected = GetViewExpected(set, firstElement, true, lastElement, false, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBetween_Exclusive_Inclusive_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(1);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetViewBetween(firstElement, false, lastElement, true);
+                List<T> expected = GetViewExpected(set, firstElement, false, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBetween_Exclusive_Exclusive_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(1);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetViewBetween(firstElement, false, lastElement, false);
+                List<T> expected = GetViewExpected(set, firstElement, false, lastElement, false, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
             }
         }
 
@@ -163,7 +356,13 @@ namespace J2N.Collections.Tests
                 T firstElement = set.ElementAt(0);
                 T lastElement = set.ElementAt(setLength - 1);
                 if (comparer.Compare(firstElement, lastElement) < 0)
-                    AssertExtensions.Throws<ArgumentException>("lowerValue", /*null,*/ () => set.GetViewBetween(lastElement, firstElement));
+                {
+                    ArgumentException ex = AssertExtensions.Throws<ArgumentException>(() => set.GetViewBetween(lastElement, firstElement));
+                    string lowerArgumentName = IsDescending ? "upperValue" : "lowerValue";
+                    string upperArgumentName = IsDescending ? "lowerValue" : "upperValue";
+                    Assert.Equal(lowerArgumentName, ex.ParamName);
+                    Assert.Contains(upperArgumentName, ex.Message);
+                }
             }
         }
 
@@ -188,7 +387,7 @@ namespace J2N.Collections.Tests
 
         [Theory]
         [MemberData(nameof(ValidCollectionSizes))]
-        public void SortedSet_Generic_GetViewBetween_Empty_MinMax(int setLength)
+        public void SortedSet_Generic_GetViewBetween_Empty_FirstLast(int setLength)
         {
             if (setLength < 4) return;
 
@@ -212,9 +411,615 @@ namespace J2N.Collections.Tests
 
             Assert.Equal(default(T), view.Min);
             Assert.Equal(default(T), view.Max);
+
+            Assert.False(view.TryGetFirst(out T value));
+            Assert.Equal(default(T), value);
+
+            Assert.False(view.TryGetLast(out value));
+            Assert.Equal(default(T), value);
         }
 
-        #endregion
+        #endregion GetViewBetween
+
+        #region GetView
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetView(firstElement, lastElement);
+                List<T> expected = GetViewExpected(set, firstElement, true, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_Inclusive_Inclusive_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetView(firstElement, true, lastElement, true);
+                List<T> expected = GetViewExpected(set, firstElement, true, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_Inclusive_Exclusive_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetView(firstElement, true, lastElement, false);
+                List<T> expected = GetViewExpected(set, firstElement, true, lastElement, false, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_Exclusive_Inclusive_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetView(firstElement, false, lastElement, true);
+                List<T> expected = GetViewExpected(set, firstElement, false, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_Exclusive_Exclusive_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetView(firstElement, false, lastElement, false);
+                List<T> expected = GetViewExpected(set, firstElement, false, lastElement, false, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(1);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetView(firstElement, lastElement);
+                List<T> expected = GetViewExpected(set, firstElement, true, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_Inclusive_Inclusive_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(1);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetView(firstElement, true, lastElement, true);
+                List<T> expected = GetViewExpected(set, firstElement, true, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_Inclusive_Exclusive_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(1);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetView(firstElement, true, lastElement, false);
+                List<T> expected = GetViewExpected(set, firstElement, true, lastElement, false, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_Exclusive_Inclusive_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(1);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetView(firstElement, false, lastElement, true);
+                List<T> expected = GetViewExpected(set, firstElement, false, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_Exclusive_Exclusive_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(1);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetView(firstElement, false, lastElement, false);
+                List<T> expected = GetViewExpected(set, firstElement, false, lastElement, false, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_LowerValueGreaterThanUpperValue_ThrowsArgumentException(int setLength)
+        {
+            if (setLength >= 2)
+            {
+                SCG.IComparer<T> comparer = GetIComparer() ?? Comparer<T>.Default;
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                if (comparer.Compare(firstElement, lastElement) < 0)
+                {
+                    const string fromArgumentName = "fromItem";
+                    const string toArgumentName = "toItem";
+                    string lowerArgumentName = IsDescending ? toArgumentName : fromArgumentName;
+                    string upperArgumentName = IsDescending ? fromArgumentName : toArgumentName;
+
+                    ArgumentException exception = AssertExtensions.Throws<ArgumentException>(() => set.GetView(lastElement, firstElement));
+                    Assert.Equal(lowerArgumentName, exception.ParamName);
+                    Assert.Contains(upperArgumentName, exception.Message);
+                }
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_Inclusive_Inclusive_LowerValueGreaterThanUpperValue_ThrowsArgumentException(int setLength)
+        {
+            if (setLength >= 2)
+            {
+                SCG.IComparer<T> comparer = GetIComparer() ?? Comparer<T>.Default;
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                if (comparer.Compare(firstElement, lastElement) < 0)
+                {
+                    const string fromArgumentName = "fromItem";
+                    const string toArgumentName = "toItem";
+                    string lowerArgumentName = IsDescending ? toArgumentName : fromArgumentName;
+                    string upperArgumentName = IsDescending ? fromArgumentName : toArgumentName;
+
+                    ArgumentException exception = AssertExtensions.Throws<ArgumentException>(() => set.GetView(lastElement, true, firstElement, true));
+                    Assert.Equal(lowerArgumentName, exception.ParamName);
+                    Assert.Contains(upperArgumentName, exception.Message);
+                }
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                SCG.IComparer<T> comparer = GetIComparer() ?? Comparer<T>.Default;
+                T firstElement = set.ElementAt(0);
+                T middleElement = set.ElementAt(setLength / 2);
+                T lastElement = set.ElementAt(setLength - 1);
+                if ((comparer.Compare(firstElement, middleElement) < 0) && (comparer.Compare(middleElement, lastElement) < 0))
+                {
+                    SortedSet<T> view = set.GetView(firstElement, middleElement);
+                    Assert.Throws<ArgumentOutOfRangeException>("toItem", () => view.GetView(middleElement, lastElement));
+                }
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_Inclusive_Inclusive_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                SCG.IComparer<T> comparer = GetIComparer() ?? Comparer<T>.Default;
+                T firstElement = set.ElementAt(0);
+                T middleElement = set.ElementAt(setLength / 2);
+                T lastElement = set.ElementAt(setLength - 1);
+                if ((comparer.Compare(firstElement, middleElement) < 0) && (comparer.Compare(middleElement, lastElement) < 0))
+                {
+                    SortedSet<T> view = set.GetView(firstElement, middleElement);
+                    Assert.Throws<ArgumentOutOfRangeException>("toItem", () => view.GetView(middleElement, true, lastElement, true));
+                }
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetView_Empty_FirstLast(int setLength)
+        {
+            if (setLength < 4) return;
+
+            SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+            Assert.Equal(setLength, set.Count);
+
+            T firstElement = set.ElementAt(0);
+            T secondElement = set.ElementAt(1);
+            T nextToLastElement = set.ElementAt(setLength - 2);
+            T lastElement = set.ElementAt(setLength - 1);
+
+            T[] items = set.ToArray();
+            for (int i = 1; i < setLength - 1; i++)
+            {
+                set.Remove(items[i]);
+            }
+            Assert.Equal(2, set.Count);
+
+            SortedSet<T> view = set.GetView(secondElement, nextToLastElement);
+            Assert.Equal(0, view.Count);
+
+            Assert.Equal(default(T), view.Min);
+            Assert.Equal(default(T), view.Max);
+
+            Assert.False(view.TryGetFirst(out T value));
+            Assert.Equal(default(T), value);
+
+            Assert.False(view.TryGetLast(out value));
+            Assert.Equal(default(T), value);
+        }
+
+        #endregion GetView
+
+        #region GetViewBefore
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBefore_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetViewBefore(lastElement);
+                List<T> expected = GetViewBeforeExpected(set, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBefore_Inclusive_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetViewBefore(lastElement, true);
+                List<T> expected = GetViewBeforeExpected(set, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBefore_Exclusive_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetViewBefore(lastElement, false);
+                List<T> expected = GetViewBeforeExpected(set, lastElement, false, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBefore_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetViewBefore(lastElement);
+                List<T> expected = GetViewBeforeExpected(set, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBefore_Inclusive_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetViewBefore(lastElement, true);
+                List<T> expected = GetViewBeforeExpected(set, lastElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBefore_Exclusive_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetViewBefore(lastElement, false);
+                List<T> expected = GetViewBeforeExpected(set, lastElement, false, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBefore_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                SCG.IComparer<T> comparer = GetIComparer() ?? Comparer<T>.Default;
+                T firstElement = set.ElementAt(0);
+                T middleElement = set.ElementAt(setLength / 2);
+                T lastElement = set.ElementAt(setLength - 1);
+                if (comparer.Compare(middleElement, lastElement) < 0)
+                {
+                    // J2N: this was confirmed to match JDK behavior
+                    SortedSet<T> view = set.GetViewBefore(middleElement);
+                    Assert.Throws<ArgumentOutOfRangeException>(() => view.GetViewBefore(lastElement));
+                    Assert.Throws<ArgumentOutOfRangeException>(() => view.GetViewBefore(lastElement, inclusive: true));
+                    Assert.Throws<ArgumentOutOfRangeException>(() => view.GetViewBefore(lastElement, inclusive: false));
+                    Assert.NotNull(view.GetViewBefore(middleElement, inclusive: true));
+                    Assert.NotNull(view.GetViewBefore(middleElement, inclusive: false));
+                }
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewBefore_Empty_FirstLast(int setLength)
+        {
+            if (setLength < 4) return;
+
+            SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+            Assert.Equal(setLength, set.Count);
+
+            T firstElement = set.ElementAt(0);
+            T secondElement = set.ElementAt(1);
+            T nextToLastElement = set.ElementAt(setLength - 2);
+            T lastElement = set.ElementAt(setLength - 1);
+
+            T[] items = set.ToArray();
+            for (int i = 0; i < setLength - 1; i++)
+            {
+                set.Remove(items[i]);
+            }
+            Assert.Equal(1, set.Count);
+
+            SortedSet<T> view = set.GetViewBefore(nextToLastElement);
+            Assert.Equal(0, view.Count);
+
+            Assert.Equal(default(T), view.Min);
+            Assert.Equal(default(T), view.Max);
+
+            Assert.False(view.TryGetFirst(out T value));
+            Assert.Equal(default(T), value);
+
+            Assert.False(view.TryGetLast(out value));
+            Assert.Equal(default(T), value);
+        }
+
+        #endregion GetViewBefore
+
+        #region GetViewAfter
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewAfter_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetViewAfter(firstElement);
+                List<T> expected = GetViewAfterExpected(set, firstElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewAfter_Inclusive_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetViewAfter(firstElement, true);
+                List<T> expected = GetViewAfterExpected(set, firstElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewAfter_Exclusive_EntireSet(int setLength)
+        {
+            if (setLength > 0)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(0);
+                T lastElement = set.ElementAt(setLength - 1);
+                SortedSet<T> view = set.GetViewAfter(firstElement, false);
+                List<T> expected = GetViewAfterExpected(set, firstElement, false, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewAfter_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(1);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetViewAfter(firstElement);
+                List<T> expected = GetViewAfterExpected(set, firstElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewAfter_Inclusive_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(1);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetViewAfter(firstElement, true);
+                List<T> expected = GetViewAfterExpected(set, firstElement, true, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewAfter_Exclusive_MiddleOfSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                T firstElement = set.ElementAt(1);
+                T lastElement = set.ElementAt(setLength - 2);
+                SortedSet<T> view = set.GetViewAfter(firstElement, false);
+                List<T> expected = GetViewAfterExpected(set, firstElement, false, GetIComparer());
+                Assert.Equal(expected.Count, view.Count);
+                Assert.True(view.SequenceEqual(expected));
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewAfter_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+                SCG.IComparer<T> comparer = GetIComparer() ?? Comparer<T>.Default;
+                T firstElement = set.ElementAt(0);
+                T middleElement = set.ElementAt(setLength / 2);
+                T lastElement = set.ElementAt(setLength - 1);
+                if (comparer.Compare(firstElement, middleElement) < 0)
+                {
+                    // J2N: this was confirmed to match JDK behavior
+                    SortedSet<T> view = set.GetViewAfter(middleElement);
+                    Assert.Throws<ArgumentOutOfRangeException>(() => view.GetViewAfter(firstElement));
+                    Assert.Throws<ArgumentOutOfRangeException>(() => view.GetViewAfter(firstElement, inclusive: true));
+                    Assert.Throws<ArgumentOutOfRangeException>(() => view.GetViewAfter(firstElement, inclusive: false));
+                    Assert.NotNull(view.GetViewAfter(middleElement, inclusive: true));
+                    Assert.NotNull(view.GetViewAfter(middleElement, inclusive: false));
+                }
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewAfter_Empty_FirstLast(int setLength)
+        {
+            if (setLength < 4) return;
+
+            SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+            Assert.Equal(setLength, set.Count);
+
+            T firstElement = set.ElementAt(0);
+            T secondElement = set.ElementAt(1);
+            T nextToLastElement = set.ElementAt(setLength - 2);
+            T lastElement = set.ElementAt(setLength - 1);
+
+            T[] items = set.ToArray();
+            for (int i = 1; i < setLength; i++)
+            {
+                set.Remove(items[i]);
+            }
+            Assert.Equal(1, set.Count);
+
+            SortedSet<T> view = set.GetViewAfter(secondElement);
+            Assert.Equal(0, view.Count);
+
+            Assert.Equal(default(T), view.Min);
+            Assert.Equal(default(T), view.Max);
+
+            Assert.False(view.TryGetFirst(out T value));
+            Assert.Equal(default(T), value);
+
+            Assert.False(view.TryGetLast(out value));
+            Assert.Equal(default(T), value);
+        }
+
+        #endregion GetViewAfter
 
         #region RemoveWhere
 
@@ -273,6 +1078,77 @@ namespace J2N.Collections.Tests
                 Assert.Equal(expected[expectedIndex++], value);
         }
 
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewDescending_IsProperlySortedAccordingToComparer(int setLength)
+        {
+            SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+            SortedSet<T> descendingSet = set.GetViewDescending();
+            List<T> expected = set.ToList();
+            expected.Sort(GetIComparer());
+            expected.Reverse();
+            int expectedIndex = 0;
+            foreach (T value in descendingSet)
+                Assert.Equal(expected[expectedIndex++], value);
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewDescending_GetViewDescending_IsProperlySortedAccordingToComparer(int setLength)
+        {
+            SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+            SortedSet<T> doubleDescendingSet = set.GetViewDescending().GetViewDescending();
+            List<T> expected = set.ToList();
+            expected.Sort(GetIComparer());
+            int expectedIndex = 0;
+            foreach (T value in doubleDescendingSet)
+                Assert.Equal(expected[expectedIndex++], value);
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_GetViewDescending_HasComparerWithReversedBehavior(int setLength)
+        {
+            SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+            SortedSet<T> descendingSet = set.GetViewDescending();
+            SortedSet<T> doubleDescendingSet = set.GetViewDescending().GetViewDescending();
+            SCG.IComparer<T> originalComparer = set.Comparer;
+            SCG.IComparer<T> descendingComparer = descendingSet.Comparer;
+            SCG.IComparer<T> doubleDescendingComparer = doubleDescendingSet.Comparer;
+
+            List<T> values = set.ToList();
+            int limit = Math.Min(values.Count, 10);
+
+            for (int i = 0; i < limit; i++)
+            {
+                for (int j = 0; j < limit; j++)
+                {
+                    T a = values[i];
+                    T b = values[j];
+
+                    int original = originalComparer.Compare(a, b);
+
+                    int reverse = descendingComparer.Compare(a, b);
+                    int reverseSwapped = descendingComparer.Compare(b, a);
+
+                    int forward = doubleDescendingComparer.Compare(a, b);
+                    int forwardSwapped = doubleDescendingComparer.Compare(b, a);
+
+                    // Core invariant: reversed ordering
+                    Assert.Equal(Math.Sign(original), -Math.Sign(reverse));
+
+                    // Symmetry invariant
+                    Assert.Equal(Math.Sign(original), Math.Sign(reverseSwapped));
+
+                    // Core invariant: double-reversed ordering (forward)
+                    Assert.Equal(Math.Sign(original), Math.Sign(forward));
+
+                    // Symmetry invariant (double-reversed)
+                    Assert.Equal(Math.Sign(original), -Math.Sign(forwardSwapped));
+                }
+            }
+        }
+
         [Fact]
         public void SortedSet_Generic_TestSubSetEnumerator()
         {
@@ -282,12 +1158,21 @@ namespace J2N.Collections.Tests
                 if (!sortedSet.Contains(i))
                     sortedSet.Add(i);
             }
-            SortedSet<int> mySubSet = sortedSet.GetViewBetween(45, 90);
+            SortedSet<int> mySubSet = sortedSet.GetView(45, 90);
 
             Assert.Equal(46, mySubSet.Count); //"not all elements were encountered"
 
             SCG.IEnumerable<int> en = mySubSet.Reverse();
-            Assert.True(mySubSet.SetEquals(en)); //"Expected to be the same set."
+            SortedSet<int> descending = mySubSet.GetViewDescending();
+
+            // J2N: Added asserts for descending set comparison
+            using var descendingEnumerator = descending.GetEnumerator();
+            foreach (int element in en)
+            {
+                Assert.True(descendingEnumerator.MoveNext());
+                Assert.Equal(element, descendingEnumerator.Current);
+            }
+            Assert.False(descendingEnumerator.MoveNext());
         }
 
         #endregion
@@ -306,6 +1191,21 @@ namespace J2N.Collections.Tests
             Assert.Equal(expected, actual);
         }
 
+        // J2N: Added to test descending set CopyTo method
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_CopyTo_GetViewDescending_WithoutIndex_PreservesReverseOrder(int setLength)
+        {
+            SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+            SortedSet<T> descendingSet = set.GetViewDescending();
+            List<T> expected = descendingSet.ToList();
+            expected.Sort(GetIComparer());
+            expected.Reverse();
+            T[] actual = new T[setLength];
+            descendingSet.CopyTo(actual);
+            Assert.Equal(expected, actual);
+        }
+
         [Theory]
         [MemberData(nameof(ValidCollectionSizes))]
         public void SortedSet_Generic_CopyTo_WithValidFullCount(int setLength)
@@ -315,6 +1215,21 @@ namespace J2N.Collections.Tests
             expected.Sort(GetIComparer());
             T[] actual = new T[setLength];
             set.CopyTo(actual, 0, setLength);
+            Assert.Equal(expected, actual);
+        }
+
+        // J2N: Added to test descending set CopyTo method
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_CopyTo_GetViewDescending_WithValidFullCount_PreservesReverseOrder(int setLength)
+        {
+            SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+            SortedSet<T> descendingSet = set.GetViewDescending();
+            List<T> expected = descendingSet.ToList();
+            expected.Sort(GetIComparer());
+            expected.Reverse();
+            T[] actual = new T[setLength];
+            descendingSet.CopyTo(actual, 0, setLength);
             Assert.Equal(expected, actual);
         }
 
@@ -408,10 +1323,12 @@ namespace J2N.Collections.Tests
             });
 
             AssertSpanLookupMatchesRootSet(set);
+            set.Clear();
+            AssertSpanLookupMatchesRootSet(set.GetViewDescending());
         }
 
         [Fact]
-        public void SortedSet_GetSpanAlternateLookup_GetViewBetween_MatchesSet()
+        public void SortedSet_GetSpanAlternateLookup_GetView_MatchesSet()
         {
             var set = new SortedSet<string>(StringComparer.Ordinal);
             for (int i = 0; i < 10; i++)
@@ -419,24 +1336,302 @@ namespace J2N.Collections.Tests
 
             var lookup = set.GetSpanAlternateLookup<char>();
 
-            // Inclusive
-            var setView = set.GetViewBetween("3", "6");
-            var lookupView = lookup.GetViewBetween("3".AsSpan(), "6".AsSpan());
+            AssertLookupMatchesSet(set, lookup, "3", "6");
 
-            Assert.Equal(setView.ToArray(), lookupView.ToArray());
+            // Descending set/view
+            var descendingSet = set.GetViewDescending();
+            var descendingLookup = descendingSet.GetSpanAlternateLookup<char>();
 
-            // Exclusive
-            setView = set.GetViewBetween("3", false, "6", false);
-            lookupView = lookup.GetViewBetween("3".AsSpan(), false, "6".AsSpan(), false);
+            AssertLookupMatchesSet(descendingSet, descendingLookup, "6", "3");
 
-            Assert.Equal(setView.ToArray(), lookupView.ToArray());
+            static void AssertLookupMatchesSet(SortedSet<string> set, SortedSet<string>.SpanAlternateLookup<char> lookup, string from, string to)
+            {
+                // Inclusive
+                var setView = set.GetView(from, to);
+                var lookupView = lookup.GetView(from.AsSpan(), to.AsSpan());
+
+                Assert.Equal(setView.ToArray(), lookupView.ToArray());
+
+                setView = set.GetView(from, true, to, true);
+                lookupView = lookup.GetView(from.AsSpan(), true, to.AsSpan(), true);
+
+                Assert.Equal(setView.ToArray(), lookupView.ToArray());
+
+                // Exclusive
+                setView = set.GetView(from, false, to, false);
+                lookupView = lookup.GetView(from.AsSpan(), false, to.AsSpan(), false);
+
+                Assert.Equal(setView.ToArray(), lookupView.ToArray());
+
+                // Mixed
+                setView = set.GetView(from, true, to, false);
+                lookupView = lookup.GetView(from.AsSpan(), true, to.AsSpan(), false);
+
+                Assert.Equal(setView.ToArray(), lookupView.ToArray());
+
+                setView = set.GetView(from, false, to, true);
+                lookupView = lookup.GetView(from.AsSpan(), false, to.AsSpan(), true);
+
+                Assert.Equal(setView.ToArray(), lookupView.ToArray());
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_GetSpanAlternateLookup_GetView_LowerValueGreaterThanUpperValue_ThrowsArgumentException_MatchingSet(int setLength)
+        {
+            if (setLength >= 2)
+            {
+                SCG.IComparer<string> comparer = StringComparer.Ordinal;
+                var set = new SortedSet<string>(comparer);
+                for (int i = 0; i < setLength; i++)
+                    set.Add(i.ToString());
+
+                Assert_LowerValueGreaterThanUpperValue_ThrowsArgumentException_MatchingSet(set, comparer, setLength);
+                Assert_LowerValueGreaterThanUpperValue_ThrowsArgumentException_MatchingSet(set.GetViewDescending(), ReverseComparer<string>.Create(comparer), setLength);
+            }
+
+            static void Assert_LowerValueGreaterThanUpperValue_ThrowsArgumentException_MatchingSet(SortedSet<string> set, SCG.IComparer<string> comparer, int setLength)
+            {
+                string firstElement = set.ElementAt(0);
+                string lastElement = set.ElementAt(setLength - 1);
+                if (comparer.Compare(firstElement, lastElement) < 0)
+                {
+                    var lookup = set.GetSpanAlternateLookup<char>();
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentException>(
+                        () => set.GetView(lastElement, firstElement),
+                        () => lookup.GetView(lastElement.AsSpan(), firstElement.AsSpan()));
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentException>(
+                        () => set.GetView(lastElement, fromInclusive: true, firstElement, toInclusive: true),
+                        () => lookup.GetView(lastElement.AsSpan(), fromInclusive: true, firstElement.AsSpan(), toInclusive: true));
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentException>(
+                       () => set.GetView(lastElement, fromInclusive: true, firstElement, toInclusive: false),
+                       () => lookup.GetView(lastElement.AsSpan(), fromInclusive: true, firstElement.AsSpan(), toInclusive: false));
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentException>(
+                       () => set.GetView(lastElement, fromInclusive: false, firstElement, toInclusive: true),
+                       () => lookup.GetView(lastElement.AsSpan(), fromInclusive: false, firstElement.AsSpan(), toInclusive: true));
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentException>(
+                       () => set.GetView(lastElement, fromInclusive: false, firstElement, toInclusive: false),
+                       () => lookup.GetView(lastElement.AsSpan(), fromInclusive: false, firstElement.AsSpan(), toInclusive: false));
+                }
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_GetSpanAlternateLookup_GetView_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException_MatchingSet(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SCG.IComparer<string> comparer = StringComparer.Ordinal;
+                var set = new SortedSet<string>(comparer);
+                for (int i = 0; i < setLength; i++)
+                    set.Add(i.ToString());
+
+                Assert_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException_MatchingSet(set, comparer, setLength);
+                Assert_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException_MatchingSet(set.GetViewDescending(), ReverseComparer<string>.Create(comparer), setLength);
+            }
+
+            static void Assert_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException_MatchingSet(SortedSet<string> set, SCG.IComparer<string> comparer, int setLength)
+            {
+                string firstElement = set.ElementAt(0);
+                string middleElement = set.ElementAt(setLength / 2);
+                string lastElement = set.ElementAt(setLength - 1);
+                if ((comparer.Compare(firstElement, middleElement) < 0) && (comparer.Compare(middleElement, lastElement) < 0))
+                {
+                    SortedSet<string> view = set.GetView(firstElement, middleElement);
+                    var lookup = view.GetSpanAlternateLookup<char>();
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentOutOfRangeException>(
+                        () => view.GetView(middleElement, lastElement),
+                        () => lookup.GetView(middleElement.AsSpan(), lastElement.AsSpan()));
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentOutOfRangeException>(
+                        () => view.GetView(middleElement, fromInclusive: true, lastElement, toInclusive: true),
+                        () => lookup.GetView(middleElement.AsSpan(), fromInclusive: true, lastElement.AsSpan(), toInclusive: true));
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentOutOfRangeException>(
+                        () => view.GetView(middleElement, fromInclusive: true, lastElement, toInclusive: false),
+                        () => lookup.GetView(middleElement.AsSpan(), fromInclusive: true, lastElement.AsSpan(), toInclusive: false));
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentOutOfRangeException>(
+                        () => view.GetView(middleElement, fromInclusive: false, lastElement, toInclusive: true),
+                        () => lookup.GetView(middleElement.AsSpan(), fromInclusive: false, lastElement.AsSpan(), toInclusive: true));
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentOutOfRangeException>(
+                        () => view.GetView(middleElement, fromInclusive: false, lastElement, toInclusive: false),
+                        () => lookup.GetView(middleElement.AsSpan(), fromInclusive: false, lastElement.AsSpan(), toInclusive: false));
+                }
+            }
         }
 
         [Fact]
-        public void SortedSet_GetSpanAlternateLookup_WorksOnRootSet()
+        public void SortedSet_GetSpanAlternateLookup_GetViewBefore_MatchesSet()
         {
             var set = new SortedSet<string>(StringComparer.Ordinal);
-            AssertSpanLookupMatchesRootSet(set);
+            for (int i = 0; i < 10; i++)
+                set.Add(i.ToString());
+
+            var lookup = set.GetSpanAlternateLookup<char>();
+
+            AssertLookupMatchesSet(set, lookup);
+
+            // Descending set/view
+            var descendingSet = set.GetViewDescending();
+            var descendingLookup = descendingSet.GetSpanAlternateLookup<char>();
+
+            AssertLookupMatchesSet(descendingSet, descendingLookup);
+
+            static void AssertLookupMatchesSet(SortedSet<string> set, SortedSet<string>.SpanAlternateLookup<char> lookup)
+            {
+                // Inclusive
+                var setView = set.GetViewBefore("6");
+                var lookupView = lookup.GetViewBefore("6".AsSpan());
+
+                Assert.Equal(setView.ToArray(), lookupView.ToArray());
+
+                setView = set.GetViewBefore("6", true);
+                lookupView = lookup.GetViewBefore("6".AsSpan(), true);
+
+                Assert.Equal(setView.ToArray(), lookupView.ToArray());
+
+                // Exclusive
+                setView = set.GetViewBefore("6", false);
+                lookupView = lookup.GetViewBefore("6".AsSpan(), false);
+
+                Assert.Equal(setView.ToArray(), lookupView.ToArray());
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_GetSpanAlternateLookup_GetViewBefore_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SCG.IComparer<string> comparer = StringComparer.Ordinal;
+                var set = new SortedSet<string>(comparer);
+                for (int i = 0; i < setLength; i++)
+                    set.Add(i.ToString());
+
+                Assert_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException_MatchingSet(set, comparer, setLength);
+                Assert_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException_MatchingSet(set.GetViewDescending(), ReverseComparer<string>.Create(comparer), setLength);
+            }
+
+            static void Assert_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException_MatchingSet(SortedSet<string> set, SCG.IComparer<string> comparer, int setLength)
+            {
+                string firstElement = set.ElementAt(0);
+                string middleElement = set.ElementAt(setLength / 2);
+                string lastElement = set.ElementAt(setLength - 1);
+                if ((comparer.Compare(firstElement, middleElement) < 0) && (comparer.Compare(middleElement, lastElement) < 0))
+                {
+                    // J2N: this was confirmed to match JDK behavior
+                    SortedSet<string> view = set.GetView(firstElement, middleElement);
+                    var lookup = view.GetSpanAlternateLookup<char>();
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentOutOfRangeException>(
+                        () => view.GetViewBefore(lastElement),
+                        () => lookup.GetViewBefore(lastElement.AsSpan()));
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentOutOfRangeException>(
+                        () => view.GetViewBefore(lastElement, inclusive: true),
+                        () => lookup.GetViewBefore(lastElement.AsSpan(), inclusive: true));
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentOutOfRangeException>(
+                        () => view.GetViewBefore(lastElement, inclusive: false),
+                        () => lookup.GetViewBefore(lastElement.AsSpan(), inclusive: false));
+
+                    Assert.NotNull(lookup.GetViewBefore(middleElement.AsSpan(), inclusive: true));
+                    Assert.NotNull(lookup.GetViewBefore(middleElement.AsSpan(), inclusive: false));
+                }
+            }
+        }
+
+        [Fact]
+        public void SortedSet_GetSpanAlternateLookup_GetViewAfter_MatchesSet()
+        {
+            var set = new SortedSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < 10; i++)
+                set.Add(i.ToString());
+
+            var lookup = set.GetSpanAlternateLookup<char>();
+
+            AssertLookupMatchesSet(set, lookup);
+
+            // Descending set/view
+            var descendingSet = set.GetViewDescending();
+            var descendingLookup = descendingSet.GetSpanAlternateLookup<char>();
+
+            AssertLookupMatchesSet(descendingSet, descendingLookup);
+
+            static void AssertLookupMatchesSet(SortedSet<string> set, SortedSet<string>.SpanAlternateLookup<char> lookup)
+            {
+                // Inclusive
+                var setView = set.GetViewAfter("3");
+                var lookupView = lookup.GetViewAfter("3".AsSpan());
+
+                Assert.Equal(setView.ToArray(), lookupView.ToArray());
+
+                setView = set.GetViewAfter("3", true);
+                lookupView = lookup.GetViewAfter("3".AsSpan(), true);
+
+                Assert.Equal(setView.ToArray(), lookupView.ToArray());
+
+                // Exclusive
+                setView = set.GetViewAfter("3", false);
+                lookupView = lookup.GetViewAfter("3".AsSpan(), false);
+
+                Assert.Equal(setView.ToArray(), lookupView.ToArray());
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_GetSpanAlternateLookup_GetViewAfter_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException(int setLength)
+        {
+            if (setLength >= 3)
+            {
+                SCG.IComparer<string> comparer = StringComparer.Ordinal;
+                var set = new SortedSet<string>(comparer);
+                for (int i = 0; i < setLength; i++)
+                    set.Add(i.ToString());
+
+                Assert_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException_MatchingSet(set, comparer, setLength);
+                Assert_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException_MatchingSet(set.GetViewDescending(), ReverseComparer<string>.Create(comparer), setLength);
+            }
+
+            static void Assert_SubsequentOutOfRangeCall_ThrowsArgumentOutOfRangeException_MatchingSet(SortedSet<string> set, SCG.IComparer<string> comparer, int setLength)
+            {
+                string firstElement = set.ElementAt(0);
+                string middleElement = set.ElementAt(setLength / 2);
+                string lastElement = set.ElementAt(setLength - 1);
+                if ((comparer.Compare(firstElement, middleElement) < 0) && (comparer.Compare(middleElement, lastElement) < 0))
+                {
+                    // J2N: this was confirmed to match JDK behavior
+                    SortedSet<string> view = set.GetViewAfter(middleElement);
+                    var lookup = view.GetSpanAlternateLookup<char>();
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentOutOfRangeException>(
+                        () => view.GetViewAfter(firstElement),
+                        () => lookup.GetViewAfter(firstElement.AsSpan()));
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentOutOfRangeException>(
+                        () => view.GetViewAfter(firstElement, inclusive: true),
+                        () => lookup.GetViewAfter(firstElement.AsSpan(), inclusive: true));
+
+                    AssertExtensions.ThrowsSameArgumentException<ArgumentOutOfRangeException>(
+                        () => view.GetViewAfter(firstElement, inclusive: false),
+                        () => lookup.GetViewAfter(firstElement.AsSpan(), inclusive: false));
+
+                    Assert.NotNull(lookup.GetViewAfter(middleElement.AsSpan(), inclusive: true));
+                    Assert.NotNull(lookup.GetViewAfter(middleElement.AsSpan(), inclusive: false));
+                }
+            }
         }
 
         [Theory]
@@ -445,30 +1640,43 @@ namespace J2N.Collections.Tests
         [InlineData(false, true)]
         [InlineData(false, false)]
         public void SortedSet_GetSpanAlternateLookup_WorksOnView(
-            bool lowerInclusive,
-            bool upperInclusive)
+            bool fromInclusive,
+            bool toInclusive)
         {
             var set = new SortedSet<string>(StringComparer.Ordinal);
             for (int i = 0; i < 10; i++)
                 set.Add(i.ToString("D2"));
 
             // View: [02,07]
-            var view = set.GetViewBetween("02", lowerInclusive, "07", upperInclusive);
+            var view = set.GetView("02", fromInclusive, "07", toInclusive);
 
-            int minInclusive = lowerInclusive ? 2 : 3;
-            int maxInclusive = upperInclusive ? 7 : 6;
+            int minInclusive = fromInclusive ? 2 : 3;
+            int maxInclusive = toInclusive ? 7 : 6;
 
             AssertSpanLookupMatchesView(view, minInclusive, maxInclusive);
 
-            int actualLower = lowerInclusive ? 1 : 2;
-            int actualUpper = upperInclusive ? 8 : 7;
+            set.Clear();
+            for (int i = 0; i < 10; i++)
+                set.Add(i.ToString("D2"));
+
+            AssertSpanLookupMatchesView(view.GetViewDescending(), minInclusive, maxInclusive);
+
+            int actualLower = fromInclusive ? 1 : 2;
+            int actualUpper = toInclusive ? 8 : 7;
+
+            // Special case - if both bounds are exclusive, the "closed range" rule takes effect.
+            // In this case, we adjust the upper up 1 because [02,07] would not throw.
+            if (!fromInclusive && !toInclusive)
+            {
+                actualUpper = 8;
+            }
 
             AssertSpanLookupRejectsOutOfRangeValues(
                 view,
                 actualLower,
                 actualUpper,
-                lowerInclusive,
-                upperInclusive);
+                fromInclusive,
+                toInclusive);
         }
 
         [Theory]
@@ -477,30 +1685,43 @@ namespace J2N.Collections.Tests
         [InlineData(false, true)]
         [InlineData(false, false)]
         public void SortedSet_GetSpanAlternateLookup_WorksOnNestedView(
-            bool lowerInclusive,
-            bool upperInclusive)
+            bool fromInclusive,
+            bool toInclusive)
         {
             var set = new SortedSet<string>(StringComparer.Ordinal);
             for (int i = 0; i < 10; i++)
                 set.Add(i.ToString("D2"));
 
-            var view1 = set.GetViewBetween("02", lowerInclusive, "08", upperInclusive);
-            var view2 = view1.GetViewBetween("03", lowerInclusive, "06", upperInclusive);
+            var view1 = set.GetView("02", fromInclusive, "08", toInclusive);
+            var view2 = view1.GetView("03", fromInclusive, "06", toInclusive);
 
-            int minInclusive = lowerInclusive ? 3 : 4;
-            int maxInclusive = upperInclusive ? 6 : 5;
+            int minInclusive = fromInclusive ? 3 : 4;
+            int maxInclusive = toInclusive ? 6 : 5;
 
             AssertSpanLookupMatchesView(view2, minInclusive, maxInclusive);
 
-            int lowerReject = lowerInclusive ? 2 : 3;
-            int upperReject = upperInclusive ? 7 : 6;
+            set.Clear();
+            for (int i = 0; i < 10; i++)
+                set.Add(i.ToString("D2"));
+
+            AssertSpanLookupMatchesView(view2.GetViewDescending(), minInclusive, maxInclusive);
+
+            int lowerReject = fromInclusive ? 2 : 3;
+            int upperReject = toInclusive ? 7 : 6;
+
+            // Special case - if both bounds are exclusive, the "closed range" rule takes effect.
+            // In this case, we adjust the upper up 1 because [02,07] would not throw.
+            if (!fromInclusive && !toInclusive)
+            {
+                upperReject = 7;
+            }
 
             AssertSpanLookupRejectsOutOfRangeValues(
                 view2,
                 lowerReject,
                 upperReject,
-                lowerInclusive,
-                upperInclusive);
+                fromInclusive,
+                toInclusive);
         }
 
         [Theory]
@@ -509,31 +1730,44 @@ namespace J2N.Collections.Tests
         [InlineData(false, true)]
         [InlineData(false, false)]
         public void SortedSet_GetSpanAlternateLookup_WorksOnDeeplyNestedViews(
-            bool lowerInclusive,
-            bool upperInclusive)
+            bool fromInclusive,
+            bool toInclusive)
         {
             var set = new SortedSet<string>(StringComparer.Ordinal);
             for (int i = 0; i < 20; i++)
                 set.Add(i.ToString("D2"));
 
-            var v1 = set.GetViewBetween("01", lowerInclusive, "18", upperInclusive);
-            var v2 = v1.GetViewBetween("03", lowerInclusive, "15", upperInclusive);
-            var v3 = v2.GetViewBetween("05", lowerInclusive, "10", upperInclusive);
+            var v1 = set.GetView("01", fromInclusive, "18", toInclusive);
+            var v2 = v1.GetView("03", fromInclusive, "15", toInclusive);
+            var v3 = v2.GetView("05", fromInclusive, "10", toInclusive);
 
-            int minInclusive = lowerInclusive ? 5 : 6;
-            int maxInclusive = upperInclusive ? 10 : 9;
+            int minInclusive = fromInclusive ? 5 : 6;
+            int maxInclusive = toInclusive ? 10 : 9;
 
             AssertSpanLookupMatchesView(v3, minInclusive, maxInclusive);
 
-            int lowerReject = lowerInclusive ? 4 : 5;
-            int upperReject = upperInclusive ? 11 : 10;
+            set.Clear();
+            for (int i = 0; i < 20; i++)
+                set.Add(i.ToString("D2"));
+
+            AssertSpanLookupMatchesView(v3.GetViewDescending(), minInclusive, maxInclusive);
+
+            int lowerReject = fromInclusive ? 4 : 5;
+            int upperReject = toInclusive ? 11 : 10;
+
+            // Special case - if both bounds are exclusive, the "closed range" rule takes effect.
+            // In this case, we adjust the upper up 1 because [05,10] would not throw.
+            if (!fromInclusive && !toInclusive)
+            {
+                upperReject = 11;
+            }
 
             AssertSpanLookupRejectsOutOfRangeValues(
                 v3,
                 lowerReject,
                 upperReject,
-                lowerInclusive,
-                upperInclusive);
+                fromInclusive,
+                toInclusive);
         }
         private static void AssertSpanLookupMatchesRootSet(SortedSet<string> set)
         {
@@ -560,7 +1794,10 @@ namespace J2N.Collections.Tests
             Assert.True(lookup.Add("a".AsSpan()));
             if (set.Comparer.Equals(StringComparer.Ordinal) ||
                 set.Comparer.Equals(StringComparer.InvariantCulture) ||
-                set.Comparer.Equals(StringComparer.CurrentCulture))
+                set.Comparer.Equals(StringComparer.CurrentCulture) ||
+                set.Comparer.Equals(ReverseComparer<string>.Create(StringComparer.Ordinal)) ||
+                set.Comparer.Equals(ReverseComparer<string>.Create(StringComparer.InvariantCulture)) ||
+                set.Comparer.Equals(ReverseComparer<string>.Create(StringComparer.CurrentCulture)))
             {
                 Assert.True(lookup.Add("A".AsSpan()));
                 Assert.True(lookup.Remove("a".AsSpan()));
@@ -705,7 +1942,7 @@ namespace J2N.Collections.Tests
             Assert.Equal(0, set.Count);
         }
 
-        private static void AssertSpanLookupRejectsOutOfRangeValues(SortedSet<string> set, int below, int above, bool lowerInclusive, bool upperInclusive)
+        private static void AssertSpanLookupRejectsOutOfRangeValues(SortedSet<string> set, int below, int above, bool fromInclusive, bool toInclusive)
         {
             var lookup = set.GetSpanAlternateLookup<char>();
 
@@ -718,10 +1955,10 @@ namespace J2N.Collections.Tests
             Assert.Throws<ArgumentOutOfRangeException>(() => set.Add(high));
             Assert.Throws<ArgumentOutOfRangeException>(() => lookup.Add(high.AsSpan()));
 
-            Assert.Throws<ArgumentOutOfRangeException>(() => set.GetViewBetween(low, high));
-            Assert.Throws<ArgumentOutOfRangeException>(() => lookup.GetViewBetween(low.AsSpan(), high.AsSpan()));
-            Assert.Throws<ArgumentOutOfRangeException>(() => set.GetViewBetween(low, lowerInclusive, high, upperInclusive));
-            Assert.Throws<ArgumentOutOfRangeException>(() => lookup.GetViewBetween(low.AsSpan(), lowerInclusive, high.AsSpan(), upperInclusive));
+            Assert.Throws<ArgumentOutOfRangeException>(() => set.GetView(low, high));
+            Assert.Throws<ArgumentOutOfRangeException>(() => lookup.GetView(low.AsSpan(), high.AsSpan()));
+            Assert.Throws<ArgumentOutOfRangeException>(() => set.GetView(low, fromInclusive, high, toInclusive));
+            Assert.Throws<ArgumentOutOfRangeException>(() => lookup.GetView(low.AsSpan(), fromInclusive, high.AsSpan(), toInclusive));
         }
 
         #endregion SpanAlternateLookup
@@ -785,6 +2022,144 @@ namespace J2N.Collections.Tests
         }
 
         #endregion
+
+        #region TryGetPredecessor
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_TryGetPredecessor(int setLength)
+        {
+            SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+            SCG.IComparer<T> comparer = GetIComparer() ?? Comparer<T>.Default;
+
+            foreach (T value in set)
+            {
+                bool foundExpected = TryGetPredecessorExpected(set, value, out T expectedValue, comparer);
+                bool foundActual = set.TryGetPredecessor(value, out T actualValue);
+
+                Assert.Equal(foundExpected, foundActual);
+                if (foundExpected)
+                    Assert.Equal(expectedValue, actualValue);
+            }
+
+            // Descending view
+            SortedSet<T> desc = set.GetViewDescending();
+
+            foreach (T value in desc)
+            {
+                bool foundExpected = TryGetPredecessorExpected(desc, value, out T expectedValue, ReverseComparer<T>.Create(comparer));
+                bool foundActual = desc.TryGetPredecessor(value, out T actualValue);
+
+                Assert.Equal(foundExpected, foundActual);
+                if (foundExpected)
+                    Assert.Equal(expectedValue, actualValue);
+            }
+        }
+
+        #endregion TryGetPredecessor
+
+        #region TryGetSuccessor
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_TryGetSuccessor(int setLength)
+        {
+            SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+            SCG.IComparer<T> comparer = GetIComparer() ?? Comparer<T>.Default;
+
+            foreach (T value in set)
+            {
+                bool foundExpected = TryGetSuccessorExpected(set, value, out T expectedValue, comparer);
+                bool foundActual = set.TryGetSuccessor(value, out T actualValue);
+
+                Assert.Equal(foundExpected, foundActual);
+                if (foundExpected)
+                    Assert.Equal(expectedValue, actualValue);
+            }
+
+            // Descending view
+            SortedSet<T> desc = set.GetViewDescending();
+
+            foreach (T value in desc)
+            {
+                bool foundExpected = TryGetSuccessorExpected(desc, value, out T expectedValue, ReverseComparer<T>.Create(comparer));
+                bool foundActual = desc.TryGetSuccessor(value, out T actualValue);
+
+                Assert.Equal(foundExpected, foundActual);
+                if (foundExpected)
+                    Assert.Equal(expectedValue, actualValue);
+            }
+        }
+
+        #endregion TryGetSuccessor
+
+        #region TryGetFloor
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_TryGetFloor(int setLength)
+        {
+            SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+            SCG.IComparer<T> comparer = GetIComparer() ?? Comparer<T>.Default;
+
+            foreach (T value in set)
+            {
+                bool foundExpected = TryGetFloorExpected(set, value, out T expectedValue, comparer);
+                bool foundActual = set.TryGetFloor(value, out T actualValue);
+
+                Assert.Equal(foundExpected, foundActual);
+                if (foundExpected)
+                    Assert.Equal(expectedValue, actualValue);
+            }
+
+            SortedSet<T> desc = set.GetViewDescending();
+
+            foreach (T value in desc)
+            {
+                bool foundExpected = TryGetFloorExpected(desc, value, out T expectedValue, ReverseComparer<T>.Create(comparer));
+                bool foundActual = desc.TryGetFloor(value, out T actualValue);
+
+                Assert.Equal(foundExpected, foundActual);
+                if (foundExpected)
+                    Assert.Equal(expectedValue, actualValue);
+            }
+        }
+
+        #endregion TryGetFloor
+
+        #region TryGetCeiling
+
+        [Theory]
+        [MemberData(nameof(ValidCollectionSizes))]
+        public void SortedSet_Generic_TryGetCeiling(int setLength)
+        {
+            SortedSet<T> set = (SortedSet<T>)GenericISetFactory(setLength);
+            SCG.IComparer<T> comparer = GetIComparer() ?? Comparer<T>.Default;
+
+            foreach (T value in set)
+            {
+                bool foundExpected = TryGetCeilingExpected(set, value, out T expectedValue, comparer);
+                bool foundActual = set.TryGetCeiling(value, out T actualValue);
+
+                Assert.Equal(foundExpected, foundActual);
+                if (foundExpected)
+                    Assert.Equal(expectedValue, actualValue);
+            }
+
+            SortedSet<T> desc = set.GetViewDescending();
+
+            foreach (T value in desc)
+            {
+                bool foundExpected = TryGetCeilingExpected(desc, value, out T expectedValue, ReverseComparer<T>.Create(comparer));
+                bool foundActual = desc.TryGetCeiling(value, out T actualValue);
+
+                Assert.Equal(foundExpected, foundActual);
+                if (foundExpected)
+                    Assert.Equal(expectedValue, actualValue);
+            }
+        }
+
+        #endregion TryGetCeiling
 
         #region Serialization
 
@@ -850,5 +2225,6 @@ namespace J2N.Collections.Tests
         }
 #endif
         #endregion Serialization
+
     }
 }

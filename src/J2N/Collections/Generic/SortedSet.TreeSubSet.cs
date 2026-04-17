@@ -14,6 +14,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.Serialization;
 #endif
 
+
 namespace J2N.Collections.Generic
 {
     public partial class SortedSet<T>
@@ -24,14 +25,14 @@ namespace J2N.Collections.Generic
         /// </summary>
         [DebuggerTypeProxy(typeof(ICollectionDebugView<>))]
         [DebuggerDisplay("Count = {Count}")]
-        internal sealed class TreeSubSet : SortedSet<T>
+        internal sealed class TreeSubSet : SortedSet<T>, ICollectionView
 #if FEATURE_SERIALIZABLE
             , ISerializable, IDeserializationCallback
 #endif
         {
-            private SortedSet<T> _underlying;
-            private T? _min;
-            private T? _max;
+            private readonly SortedSet<T> _underlying;
+            private readonly T? _min;
+            private readonly T? _max;
             // keeps track of whether the count variable is up to date
             // up to date -> _countVersion = _underlying.version
             // not up to date -> _countVersion < _underlying.version
@@ -40,16 +41,35 @@ namespace J2N.Collections.Generic
             // for instance, you could allow this subset to be defined for i > 10. The set will throw if
             // anything <= 10 is added, but there is no upper bound. These features Head(), Tail(), were punted
             // in the spec, and are not available, but the framework is there to make them available at some point.
-            private bool _lBoundActive, _uBoundActive;
-            private bool _lBoundInclusive, _uBoundInclusive;
+            private readonly bool _lBoundActive, _uBoundActive;
+            private readonly bool _lBoundInclusive, _uBoundInclusive;
 
-            // used to see if the count is out of date
+            private readonly bool _reverse;
+            private IComparer<T>? _reverseComparer;
 
+            internal override IComparer<T> ComparerInternal
+            {
+                get
+                {
+                    if (_reverse)
+                    {
+                        return _reverseComparer ??= ReverseComparer<T>.Create(_underlying.ComparerInternal);
+                    }
+                    return _underlying.ComparerInternal;
+                }
+            }
 
+            #region ICollectionView Members
+
+            bool ICollectionView.IsView => true;
+
+            #endregion
 
             #region Properties for Alternate Lookup
 
             // J2N: This is state from TreeSubSet exposed to allow range checks in Alternate Lookup
+
+            internal override bool IsReversed => _reverse;
 
             internal override SortedSet<T> UnderlyingSet => _underlying;
 
@@ -64,14 +84,117 @@ namespace J2N.Collections.Generic
 
             #endregion
 
+            #region Subclass helpers
+
+            /// <inheritdoc/>
+            internal override T? LowerValue
+            {
+                get
+                {
+                    Debug.Assert(_underlying != null);
+                    if (version != _underlying!.version) // [!] asserted above
+                        VersionCheck();
+
+                    // J2N: Added caching to the value so we don't have to traverse the tree again unless the set is mutated.
+                    if (minVersion == version)
+                        return cachedMin;
+
+                    Node? current = root;
+                    T? result = default;
+
+                    while (current != null)
+                    {
+                        int comp = _lBoundActive ? comparer.Compare(_min!, current.Item!) : -1;
+                        if (comp > 0 || (comp == 0 && !_lBoundInclusive))
+                        {
+                            current = current.Right;
+                        }
+                        else
+                        {
+                            result = current.Item;
+                            if (comp == 0)
+                            {
+                                if (!_lBoundInclusive)
+                                {
+                                    current = current.Left;
+                                    result = current != null ? current.Item : default;
+                                }
+                                break;
+                            }
+                            current = current.Left;
+                        }
+                    }
+
+                    minVersion = version;
+                    cachedMin = result;
+                    return result;
+                }
+            }
+
+            /// <inheritdoc/>
+            internal override T? UpperValue
+            {
+                get
+                {
+                    Debug.Assert(_underlying != null);
+                    if (version != _underlying!.version) // [!] asserted above
+                        VersionCheck();
+
+                    // J2N: Added caching to the value so we don't have to traverse the tree again unless the set is mutated.
+                    if (maxVersion == version)
+                        return cachedMax;
+
+                    Node? current = root;
+                    T? result = default;
+
+                    while (current != null)
+                    {
+                        int comp = _uBoundActive ? comparer.Compare(_max!, current.Item!) : 1;
+                        if (comp < 0 || (comp == 0 && !_uBoundInclusive))
+                        {
+                            current = current.Left;
+                        }
+                        else
+                        {
+                            result = current.Item;
+                            if (comp == 0)
+                            {
+                                if (!_uBoundInclusive)
+                                {
+                                    current = current.Right;
+                                    result = current != null ? current.Item : default;
+                                }
+                                break;
+                            }
+                            current = current.Right;
+                        }
+                    }
+
+                    maxVersion = version;
+                    cachedMax = result;
+                    return result;
+                }
+            }
+
+            internal override void EnsureTreeOrder(T[] array, int length)
+            {
+                if (_reverse && length > 1)
+                {
+                    Array.Reverse(array, 0, length);
+                }
+            }
+
+            #endregion
+
+
+            // used to see if the count is out of date
 #if DEBUG
             internal override bool versionUpToDate()
             {
                 return (version == _underlying.version);
             }
 #endif
-
-            public TreeSubSet(SortedSet<T> Underlying, [AllowNull] T Min, bool lowerBoundInclusive, [AllowNull] T Max, bool upperBoundInclusive, bool lowerBoundActive, bool upperBoundActive)
+            public TreeSubSet(SortedSet<T> Underlying, [AllowNull] T Min, bool lowerBoundInclusive, [AllowNull] T Max, bool upperBoundInclusive, bool lowerBoundActive, bool upperBoundActive, bool reverse)
                 : base(Underlying.Comparer)
             {
                 _underlying = Underlying;
@@ -81,6 +204,7 @@ namespace J2N.Collections.Generic
                 _uBoundInclusive = upperBoundInclusive;
                 _lBoundActive = lowerBoundActive;
                 _uBoundActive = upperBoundActive;
+                _reverse = reverse;
                 root = _underlying.FindRange(_min, _max, _lBoundInclusive, _uBoundInclusive, _lBoundActive, _uBoundActive); // root is first element within range
                 count = 0;
                 version = -1;
@@ -149,24 +273,55 @@ namespace J2N.Collections.Generic
             }
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            internal override bool IsWithinRange(T item)
+            internal override bool IsWithinRange([AllowNull] T item)
             {
-                return !IsTooLow(item) && !IsTooHigh(item);
+                // Check whether too low
+                if (_lBoundActive)
+                {
+                    int c = comparer.Compare(item!, _min!);
+                    if (c < 0 || (c == 0 && !_lBoundInclusive))
+                        return false;
+                }
+
+                // Check whether too high
+                if (_uBoundActive)
+                {
+                    int c = comparer.Compare(item!, _max!);
+                    if (c > 0 || (c == 0 && !_uBoundInclusive))
+                        return false;
+                }
+
+                return true;
+            }
+
+            private bool IsWithinRange([AllowNull] T item, bool inclusive)
+                => inclusive ? IsWithinRange(item) : IsWithinClosedRange(item);
+
+
+            private bool IsWithinClosedRange([AllowNull] T item)
+            {
+                if (_lBoundActive)
+                {
+                    if (comparer.Compare(item!, _min!) < 0)
+                        return false;
+                }
+
+                if (_uBoundActive)
+                {
+                    if (comparer.Compare(item!, _max!) > 0)
+                        return false;
+                }
+
+                return true;
             }
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             internal override bool IsTooHigh([AllowNull] T item)
             {
-                return IsTooHigh(item, _uBoundInclusive);
-            }
-
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            private bool IsTooHigh([AllowNull] T item, bool upperBoundInclusive)
-            {
                 if (_uBoundActive)
                 {
-                    int c = Comparer.Compare(item!, _max!);
-                    if (c > 0 || (c == 0 && !upperBoundInclusive))
+                    int c = comparer.Compare(item!, _max!);
+                    if (c > 0 || (c == 0 && !_uBoundInclusive))
                         return true;
                 }
                 return false;
@@ -175,87 +330,47 @@ namespace J2N.Collections.Generic
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             internal override bool IsTooLow([AllowNull] T item)
             {
-                return IsTooLow(item, _lBoundInclusive);
-            }
-
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            private bool IsTooLow([AllowNull] T item, bool lowerBoundInclusive)
-            {
                 if (_lBoundActive)
                 {
-                    int c = Comparer.Compare(item!, _min!);
-                    if (c < 0 || (c == 0 && !lowerBoundInclusive))
+                    int c = comparer.Compare(item!, _min!);
+                    if (c < 0 || (c == 0 && !_lBoundInclusive))
                         return true;
                 }
                 return false;
             }
 
-            internal override T MinInternal
+            /// <inheritdoc/>
+            internal override T? MinInternal => _reverse ? UpperValue : LowerValue;
+
+            /// <inheritdoc/>
+            internal override T? MaxInternal => _reverse ? LowerValue : UpperValue;
+
+            internal override bool DoTryGetFirst([MaybeNullWhen(false)] out T result)
             {
-                get
-                {
-                    Node? current = root;
-                    T? result = default;
+                VersionCheck(updateCount: true);
 
-                    while (current != null)
-                    {
-                        int comp = _lBoundActive ? Comparer.Compare(_min!, current.Item!) : -1;
-                        if (comp > 0 || (comp == 0 && !_lBoundInclusive))
-                        {
-                            current = current.Right;
-                        }
-                        else
-                        {
-                            result = current.Item;
-                            if (comp == 0)
-                            {
-                                if (!_lBoundInclusive)
-                                {
-                                    current = current.Left;
-                                    result = current != null ? current.Item : default;
-                                }
-                                break;
-                            }
-                            current = current.Left;
-                        }
-                    }
-
-                    return result!;
-                }
+                return base.DoTryGetFirst(out result);
             }
 
-            internal override T MaxInternal
+            internal override bool DoTryGetLast([MaybeNullWhen(false)] out T result)
             {
-                get
-                {
-                    Node? current = root;
-                    T? result = default;
+                VersionCheck(updateCount: true);
 
-                    while (current != null)
-                    {
-                        int comp = _uBoundActive ? Comparer.Compare(_max!, current.Item!) : 1;
-                        if (comp < 0 || (comp == 0 && !_uBoundInclusive))
-                        {
-                            current = current.Left;
-                        }
-                        else
-                        {
-                            result = current.Item;
-                            if (comp == 0)
-                            {
-                                if (!_uBoundInclusive)
-                                {
-                                    current = current.Right;
-                                    result = current != null ? current.Item : default;
-                                }
-                                break;
-                            }
-                            current = current.Right;
-                        }
-                    }
+                return base.DoTryGetLast(out result);
+            }
 
-                    return result!;
-                }
+            internal override bool DoRemoveFirst([MaybeNullWhen(false)] out T value)
+            {
+                VersionCheck(updateCount: true);
+
+                return base.DoRemoveFirst(out value);
+            }
+
+            internal override bool DoRemoveLast([MaybeNullWhen(false)] out T value)
+            {
+                VersionCheck(updateCount: true);
+
+                return base.DoRemoveLast(out value);
             }
 
             internal override bool InOrderTreeWalk(TreeWalkPredicate<T> action)
@@ -337,11 +452,11 @@ namespace J2N.Collections.Generic
                     {
                         return false;
                     }
-                    if (current.Left != null && (!_lBoundActive || Comparer.Compare(_min!, current.Item!) < 0))
+                    if (current.Left != null && (!_lBoundActive || comparer.Compare(_min!, current.Item!) < 0))
                     {
                         processQueue.Enqueue(current.Left);
                     }
-                    if (current.Right != null && (!_uBoundActive || Comparer.Compare(_max!, current.Item!) > 0))
+                    if (current.Right != null && (!_uBoundActive || comparer.Compare(_max!, current.Item!) > 0))
                     {
                         processQueue.Enqueue(current.Right);
                     }
@@ -371,13 +486,21 @@ namespace J2N.Collections.Generic
                 foreach (T i in this)
                 {
                     count++;
-                    if (Comparer.Compare(item, i) == 0)
+                    if (comparer.Compare(item, i) == 0)
                         return count;
                 }
 #if DEBUG
                 Debug.Assert(this.versionUpToDate() && root == _underlying.FindRange(_min, _max, _lBoundInclusive, _uBoundInclusive, _lBoundActive, _uBoundActive));
 #endif
                 return -1;
+            }
+
+            // J2N: We need to override for views to ensure the underlying set version is updated
+            internal override void UpdateVersion()
+            {
+                Debug.Assert(_underlying != null);
+                _underlying!.UpdateVersion(); // [!] asserted above
+                base.UpdateVersion();
             }
 
             /// <summary>
@@ -389,7 +512,7 @@ namespace J2N.Collections.Generic
             private void VersionCheckImpl(bool updateCount)
             {
                 Debug.Assert(_underlying != null);
-                if (version != _underlying!.version)
+                if (version != _underlying!.version) // [!] asserted above
                 {
                     root = _underlying.FindRange(_min, _max, _lBoundInclusive, _uBoundInclusive, _lBoundActive, _uBoundActive);
                     version = _underlying.version;
@@ -409,39 +532,137 @@ namespace J2N.Collections.Generic
             internal override int TotalCount()
             {
                 Debug.Assert(_underlying != null);
-                return _underlying!.Count;
+                return _underlying!.Count; // [!] asserted above
+            }
+
+            // This passes functionality down to the underlying tree, clipping edges and reversing
+            // argument order if necessary. There's nothing gained by having a nested subset. May
+            // as well draw it from the base. Cannot increase the bounds of the subset, can only decrease it.
+            internal override SortedSet<T> DoGetView([AllowNull] T fromItem, bool fromInclusive, ExceptionArgument fromArgumentName, [AllowNull] T toItem, bool toInclusive, ExceptionArgument toArgumentName)
+            {
+                T? lower = _reverse ? toItem : fromItem;
+                T? upper = _reverse ? fromItem : toItem;
+                bool lowerInclusive = _reverse ? toInclusive : fromInclusive;
+                bool upperInclusive = _reverse ? fromInclusive : toInclusive;
+                ExceptionArgument lowerArgumentName = _reverse ? toArgumentName : fromArgumentName;
+                ExceptionArgument upperArgumentName = _reverse ? fromArgumentName : toArgumentName;
+
+                if (!IsWithinRange(lower, lowerInclusive))
+                {
+                    ThrowHelper.ThrowArgumentOutOfRangeException(lowerArgumentName);
+                }
+                if (!IsWithinRange(upper, upperInclusive))
+                {
+                    ThrowHelper.ThrowArgumentOutOfRangeException(upperArgumentName);
+                }
+
+                return base.DoGetView(lower, lowerInclusive, lowerArgumentName, upper, upperInclusive, upperArgumentName);
             }
 
             // This passes functionality down to the underlying tree, clipping edges if necessary
             // There's nothing gained by having a nested subset. May as well draw it from the base
             // Cannot increase the bounds of the subset, can only decrease it
-            public override SortedSet<T> GetViewBetween([AllowNull] T lowerValue, [AllowNull] T upperValue)
+            internal override SortedSet<T> DoGetViewBefore([AllowNull] T toItem, bool inclusive, ExceptionArgument toArgumentName)
             {
-                if (IsTooLow(lowerValue, _lBoundInclusive))
+                if (!IsWithinRange(toItem, inclusive))
                 {
-                    ThrowHelper.ThrowArgumentOutOfRangeException(ExceptionArgument.lowerValue);
+                    ThrowHelper.ThrowArgumentOutOfRangeException(toArgumentName);
                 }
-                if (IsTooHigh(upperValue, _uBoundInclusive))
-                {
-                    ThrowHelper.ThrowArgumentOutOfRangeException(ExceptionArgument.upperValue);
-                }
-                return (TreeSubSet)_underlying.GetViewBetween(lowerValue, _lBoundInclusive, upperValue, _uBoundInclusive);
+
+                return !_reverse
+                    ? GetViewBeforeCore(toItem, inclusive)
+                    : GetViewAfterCore(toItem, inclusive);
             }
 
             // This passes functionality down to the underlying tree, clipping edges if necessary
             // There's nothing gained by having a nested subset. May as well draw it from the base
             // Cannot increase the bounds of the subset, can only decrease it
-            public override SortedSet<T> GetViewBetween([AllowNull] T lowerValue, bool lowerValueInclusive, [AllowNull] T upperValue, bool upperValueInclusive)
+            internal override SortedSet<T> DoGetViewAfter([AllowNull] T fromItem, bool inclusive, ExceptionArgument fromArgumentName)
             {
-                if (IsTooLow(lowerValue, lowerValueInclusive))
+                if (!IsWithinRange(fromItem, inclusive))
                 {
-                    ThrowHelper.ThrowArgumentOutOfRangeException(ExceptionArgument.lowerValue);
+                    ThrowHelper.ThrowArgumentOutOfRangeException(fromArgumentName);
                 }
-                if (IsTooHigh(upperValue, upperValueInclusive))
+
+                return !_reverse
+                    ? GetViewAfterCore(fromItem, inclusive)
+                    : GetViewBeforeCore(fromItem, inclusive);
+            }
+
+            private SortedSet<T> GetViewBeforeCore([AllowNull] T toItem, bool inclusive)
+            {
+                T? upper;
+                bool upperInclusive;
+
+                // Fast path - no upper bound, no equality possible
+                if (!_uBoundActive)
                 {
-                    ThrowHelper.ThrowArgumentOutOfRangeException(ExceptionArgument.upperValue);
+                    upper = toItem;
+                    upperInclusive = inclusive;
                 }
-                return (TreeSubSet)_underlying.GetViewBetween(lowerValue, lowerValueInclusive, upperValue, upperValueInclusive);
+                else
+                {
+                    // Compute comparison ONCE
+                    int cmp = comparer.Compare(toItem!, _max!);
+                    if (cmp < 0)
+                    {
+                        // Override with new value
+                        upper = toItem;
+                        upperInclusive = inclusive;
+                    }
+                    else if (cmp > 0)
+                    {
+                        // Clipped by upper bound
+                        upper = _max;
+                        upperInclusive = _uBoundInclusive;
+                    }
+                    else // cmp == 0
+                    {
+                        // Rare equality case
+                        upper = _max;
+                        upperInclusive = _uBoundInclusive && inclusive;
+                    }
+                }
+
+                return new TreeSubSet(_underlying, _min, _lBoundInclusive, upper, upperInclusive, _lBoundActive, true, _reverse);
+            }
+
+            private SortedSet<T> GetViewAfterCore([AllowNull] T fromItem, bool inclusive)
+            {
+                T? lower;
+                bool lowerInclusive;
+
+                // Fast path - no lower bound, no equality possible
+                if (!_lBoundActive)
+                {
+                    lower = fromItem;
+                    lowerInclusive = inclusive;
+                }
+                else
+                {
+                    // Compute comparison ONCE
+                    int cmp = comparer.Compare(fromItem!, _min!);
+                    if (cmp > 0)
+                    {
+                        // Override with new value
+                        lower = fromItem;
+                        lowerInclusive = inclusive;
+                    }
+                    else if (cmp < 0)
+                    {
+                        // Clipped by lower bound
+                        lower = _min;
+                        lowerInclusive = _lBoundInclusive;
+                    }
+                    else // cmp == 0
+                    {
+                        // Rare equality case
+                        lower = _min;
+                        lowerInclusive = _lBoundInclusive && inclusive;
+                    }
+                }
+
+                return new TreeSubSet(_underlying, lower, lowerInclusive, _max, _uBoundInclusive, true, _uBoundActive, _reverse);
             }
 
 #if DEBUG
@@ -452,7 +673,54 @@ namespace J2N.Collections.Generic
             }
 #endif
 
-            internal override bool DoTryGetPredecessor(T item, [MaybeNullWhen(false)] out T result)
+            internal override void SymmetricExceptWithValue(T item)
+            {
+                // J2N: We perform the range check here to bypass the range checks in
+                // Add/Remove/FindNode. This relies on TreeSubSet invariants and must
+                // stay up to date with the underlying tree semantics.
+
+                // We only check the range once
+                if (!IsWithinRange(item))
+                {
+                    return;
+                }
+
+                /////////////////////////////////////
+                // Contains (FindNode) (without range check)
+                /////////////////////////////////////
+
+                VersionCheck();
+#if DEBUG
+                Debug.Assert(versionUpToDate() && root == _underlying.FindRange(_min, _max, _lBoundInclusive, _uBoundInclusive, _lBoundActive, _uBoundActive));
+#endif
+                if (base.FindNode(item) != null)
+                {
+                    /////////////////////////////////////
+                    // Remove (without range check)
+                    /////////////////////////////////////
+                    _underlying.DoRemove(item, out _);
+                    VersionCheck();
+#if DEBUG
+                    Debug.Assert(versionUpToDate() && root == _underlying.FindRange(_min, _max, _lBoundInclusive, _uBoundInclusive, _lBoundActive, _uBoundActive));
+#endif
+                }
+                else
+                {
+                    /////////////////////////////////////
+                    // Add (without range check)
+                    /////////////////////////////////////
+                    _underlying.AddIfNotPresent(item);
+                    VersionCheck();
+#if DEBUG
+                    Debug.Assert(this.versionUpToDate() && root == _underlying.FindRange(_min, _max, _lBoundInclusive, _uBoundInclusive, _lBoundActive, _uBoundActive));
+#endif
+                }
+            }
+
+            internal override bool DoTryGetPredecessor([AllowNull] T item, [MaybeNullWhen(false)] out T result)
+                => _reverse ? TryGetSuccessorCore(item, out result) : TryGetPredecessorCore(item, out result);
+
+            internal bool TryGetPredecessorCore([AllowNull] T item, [MaybeNullWhen(false)] out T result)
             {
                 VersionCheck();
 #if DEBUG
@@ -471,7 +739,7 @@ namespace J2N.Collections.Generic
 
                 while (current != null)
                 {
-                    int cmp = Comparer.Compare(item, current.Item);
+                    int cmp = comparer.Compare(item!, current.Item);
 
                     if (cmp > 0)
                     {
@@ -495,7 +763,10 @@ namespace J2N.Collections.Generic
                 return true;
             }
 
-            internal override bool DoTryGetSuccessor(T item, [MaybeNullWhen(false)] out T result)
+            internal override bool DoTryGetSuccessor([AllowNull] T item, [MaybeNullWhen(false)] out T result)
+                => _reverse ? TryGetPredecessorCore(item, out result) : TryGetSuccessorCore(item, out result);
+
+            internal bool TryGetSuccessorCore([AllowNull] T item, [MaybeNullWhen(false)] out T result)
             {
                 VersionCheck();
 #if DEBUG
@@ -514,7 +785,7 @@ namespace J2N.Collections.Generic
 
                 while (current != null)
                 {
-                    int cmp = Comparer.Compare(item, current.Item);
+                    int cmp = comparer.Compare(item!, current.Item);
 
                     if (cmp < 0)
                     {
@@ -538,7 +809,10 @@ namespace J2N.Collections.Generic
                 return true;
             }
 
-            internal override bool DoTryGetFloor(T item, [MaybeNullWhen(false)] out T result)
+            internal override bool DoTryGetFloor([AllowNull] T item, [MaybeNullWhen(false)] out T result)
+                => _reverse ? TryGetCeilingCore(item, out result) : TryGetFloorCore(item, out result);
+
+            internal bool TryGetFloorCore([AllowNull] T item, [MaybeNullWhen(false)] out T result)
             {
                 VersionCheck();
 #if DEBUG
@@ -550,7 +824,7 @@ namespace J2N.Collections.Generic
 
                 while (current != null)
                 {
-                    int cmp = Comparer.Compare(item, current.Item);
+                    int cmp = comparer.Compare(item!, current.Item);
 
                     if (cmp < 0)
                     {
@@ -573,7 +847,10 @@ namespace J2N.Collections.Generic
                 return true;
             }
 
-            internal override bool DoTryGetCeiling(T item, [MaybeNullWhen(false)] out T result)
+            internal override bool DoTryGetCeiling([AllowNull] T item, [MaybeNullWhen(false)] out T result)
+                => _reverse ? TryGetFloorCore(item, out result) : TryGetCeilingCore(item, out result);
+
+            internal bool TryGetCeilingCore([AllowNull] T item, [MaybeNullWhen(false)] out T result)
             {
                 VersionCheck();
 #if DEBUG
@@ -585,7 +862,7 @@ namespace J2N.Collections.Generic
 
                 while (current != null)
                 {
-                    int cmp = Comparer.Compare(item, current.Item);
+                    int cmp = comparer.Compare(item!, current.Item);
 
                     if (cmp > 0)
                     {
