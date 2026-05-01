@@ -1,4 +1,4 @@
-﻿#region Copyright 2019-2021 by Shad Storhaug, Licensed under the Apache License, Version 2.0
+﻿#region Copyright 2019-2026 by Shad Storhaug, Licensed under the Apache License, Version 2.0
 /*  Licensed to the Apache Software Foundation (ASF) under one or more
  *  contributor license agreements.  See the NOTICE file distributed with
  *  this work for additional information regarding copyright ownership.
@@ -21,6 +21,8 @@ using J2N.Text;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 
 namespace J2N.Collections.ObjectModel
 {
@@ -72,7 +74,7 @@ namespace J2N.Collections.ObjectModel
         /// This constructor is an O(1) operation.
         /// </remarks>
         public ReadOnlyCollection(ICollection<T> collection)
-            : this(collection, TIsValueTypeOrStringOrStructuralEquatable ? StructuralEqualityComparer.Default : StructuralEqualityComparer.Aggressive, StringFormatter.CurrentCulture)
+            : this(collection, ChooseComparer(), StringFormatter.CurrentCulture)
         {
         }
 
@@ -87,6 +89,20 @@ namespace J2N.Collections.ObjectModel
             this.collection = collection;
             this.structuralEqualityComparer = structuralEqualityComparer;
             this.toStringFormatProvider = toStringFormatProvider;
+        }
+
+        [UnconditionalSuppressMessage("ReflectionAnalysis",
+            "IL3050",
+            Justification = "The call to Aggressive is guarded by a check for RuntimeFeature.IsDynamicCodeSupported.")]
+        private static StructuralEqualityComparer ChooseComparer()
+        {
+            if (TIsValueTypeOrStringOrStructuralEquatable)
+                return StructuralEqualityComparer.Default;
+
+            if (!RuntimeFeature.IsDynamicCodeSupported)
+                return StructuralEqualityComparer.AggressiveNotSupported;
+
+            return StructuralEqualityComparer.Aggressive;
         }
 
         /// <summary>
@@ -293,32 +309,54 @@ namespace J2N.Collections.ObjectModel
         /// whether the current object and <paramref name="other"/> are structurally equal.</param>
         /// <returns><c>true</c> if <paramref name="other"/> is structurally equal to the current list;
         /// otherwise, <c>false</c>.</returns>
+        /// <remarks>
+        /// This method uses Reflection and is not safe for AOT trimming. It is highly recommended to use one of the
+        /// other read-only collections instead. AOT users should always use J2N collections instead of .NET collections,
+        /// as they are designed to never use Reflection for equality comparisons.
+        /// </remarks>
         /// <exception cref="ArgumentNullException">If <paramref name="comparer"/> is <c>null</c>.</exception>
+        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL3050",
+            Justification = "Guarded by RuntimeFeature.IsDynamicCodeSupported. Not a supported API for AOT, but is also not commonly used.")]
         public virtual bool Equals(object? other, IEqualityComparer comparer)
+        {
+            if (comparer is null)
+                ThrowHelper.ThrowArgumentNullException(ExceptionArgument.comparer);
+
+            if (!RuntimeFeature.IsDynamicCodeSupported)
+            {
+                ThrowHelper.ThrowPlatformNotSupportedException(ExceptionResource.PlatformNotSupported_NoAggressiveMode);
+                return false;
+            }
+
+            return EqualsAggressive(other, comparer);
+        }
+
+        [RequiresDynamicCode("Aggressive structural comparison uses reflection.")]
+        private bool EqualsAggressive(object? other, IEqualityComparer comparer)
         {
             if (other is null)
                 return false;
             if (ReferenceEquals(collection, other))
                 return true;
 
-            if (collection is IList<T> list)
+            if (collection.GetType().ImplementsGenericInterface(typeof(IDictionary<,>)))
             {
-                if (!(other is IList<T> otherList))
+                if (!other.GetType().ImplementsGenericInterface(typeof(IDictionary<,>)))
                     return false;
 
-                if (comparer is ListEqualityComparer<T> listComparer)
-                    return listComparer.Equals(list, otherList);
+                if (comparer is IDictionaryEqualityComparer dictionaryComparer)
+                    return dictionaryComparer.Equals(collection, other);
 
-                if (comparer is StructuralEqualityComparer)
-                {
-                    ListEqualityComparer<T> toUse;
-                    if (StructuralEqualityComparer.Aggressive.Equals(comparer))
-                        toUse = ListEqualityComparer<T>.Aggressive;
-                    else
-                        toUse = ListEqualityComparer<T>.Default;
+                // J2N TODO: Convert a non-generic StructuralEqualityComparer mode to a generic one
+                //if (comparer is StructuralEqualityComparer)
+                //{
+                //    DictionaryEqualityComparer<object, object>
 
-                    return toUse.Equals(list, otherList);
-                }
+                //    //IEqualityComparer toUse;
+                //    //if (StructuralEqualityComparer.Aggressive.Equals(comparer))
+                //    //    toUse = DictionaryEqualityComparer
+
+                //}
             }
             else if (collection is ISet<T> set)
             {
@@ -339,24 +377,24 @@ namespace J2N.Collections.ObjectModel
                     return toUse.Equals(set, otherSet);
                 }
             }
-            else if (collection.GetType().ImplementsGenericInterface(typeof(IDictionary<,>)))
+            else if (collection is IList<T> list)
             {
-                if (!other.GetType().ImplementsGenericInterface(typeof(IDictionary<,>)))
+                if (!(other is IList<T> otherList))
                     return false;
 
-                if (comparer is IDictionaryEqualityComparer dictionaryComparer)
-                    return dictionaryComparer.Equals(collection, other);
+                if (comparer is ListEqualityComparer<T> listComparer)
+                    return listComparer.Equals(list, otherList);
 
-                // J2N TODO: Convert a non-generic StructuralEqualityComparer mode to a generic one
-                //if (comparer is StructuralEqualityComparer)
-                //{
-                //    DictionaryEqualityComparer<object, object>
+                if (comparer is StructuralEqualityComparer)
+                {
+                    ListEqualityComparer<T> toUse;
+                    if (StructuralEqualityComparer.Aggressive.Equals(comparer))
+                        toUse = ListEqualityComparer<T>.Aggressive;
+                    else
+                        toUse = ListEqualityComparer<T>.Default;
 
-                //    //IEqualityComparer toUse;
-                //    //if (StructuralEqualityComparer.Aggressive.Equals(comparer))
-                //    //    toUse = DictionaryEqualityComparer
-
-                //}
+                    return toUse.Equals(list, otherList);
+                }
             }
 
             // Custom collection type
@@ -370,25 +408,46 @@ namespace J2N.Collections.ObjectModel
         /// <param name="comparer">The <see cref="IEqualityComparer"/> implementation to use to generate
         /// the hash code.</param>
         /// <returns>A hash code representing the current list.</returns>
+        /// <exception cref="ArgumentNullException">If <paramref name="comparer"/> is <c>null</c>.</exception>
+        /// <remarks>
+        /// This method uses Reflection and is not safe for AOT trimming. It is highly recommended to use one of the
+        /// other read-only collections instead. AOT users should always use J2N collections instead of .NET collections,
+        /// as they are designed to never use Reflection for equality comparisons.
+        /// </remarks>
+        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL3050",
+            Justification = "Guarded by RuntimeFeature.IsDynamicCodeSupported. Not a supported API for AOT, but is also not commonly used.")]
         public virtual int GetHashCode(IEqualityComparer comparer)
         {
-            if (collection is IList<T> list)
+            if (comparer is null)
+                ThrowHelper.ThrowArgumentNullException(ExceptionArgument.comparer);
+
+            if (!RuntimeFeature.IsDynamicCodeSupported)
             {
-                if (comparer is ListEqualityComparer<T> listComparer)
-                    return listComparer.GetHashCode(list);
+                ThrowHelper.ThrowPlatformNotSupportedException(ExceptionResource.PlatformNotSupported_NoAggressiveMode);
+                return 0;
+            }
 
-                if (comparer is StructuralEqualityComparer)
-                {
-                    ListEqualityComparer<T> toUse;
-                    if (StructuralEqualityComparer.Aggressive.Equals(comparer))
-                        toUse = ListEqualityComparer<T>.Aggressive;
-                    else
-                        toUse = ListEqualityComparer<T>.Default;
+            return GetHashCodeAggressive(comparer);
+        }
 
-                    return toUse.GetHashCode(list);
-                }
+        [RequiresDynamicCode("Aggressive structural comparison uses reflection.")]
+        private int GetHashCodeAggressive(IEqualityComparer comparer)
+        {
+            if (collection.GetType().ImplementsGenericInterface(typeof(IDictionary<,>)))
+            {
+                if (comparer is IDictionaryEqualityComparer dictionaryComparer)
+                    return dictionaryComparer.GetHashCode(collection);
 
-                return comparer.GetHashCode(list);
+                // J2N TODO: Convert a non-generic StructuralEqualityComparer mode to a generic one
+                //if (comparer is StructuralEqualityComparer)
+                //{
+                //    DictionaryEqualityComparer<object, object>
+
+                //    //IEqualityComparer toUse;
+                //    //if (StructuralEqualityComparer.Aggressive.Equals(comparer))
+                //    //    toUse = DictionaryEqualityComparer
+
+                //}
             }
             else if (collection is ISet<T> set)
             {
@@ -406,21 +465,23 @@ namespace J2N.Collections.ObjectModel
                     return toUse.GetHashCode(set);
                 }
             }
-            else if (collection.GetType().ImplementsGenericInterface(typeof(IDictionary<,>)))
+            else if (collection is IList<T> list)
             {
-                if (comparer is IDictionaryEqualityComparer dictionaryComparer)
-                    return dictionaryComparer.GetHashCode(collection);
+                if (comparer is ListEqualityComparer<T> listComparer)
+                    return listComparer.GetHashCode(list);
 
-                // J2N TODO: Convert a non-generic StructuralEqualityComparer mode to a generic one
-                //if (comparer is StructuralEqualityComparer)
-                //{
-                //    DictionaryEqualityComparer<object, object>
+                if (comparer is StructuralEqualityComparer)
+                {
+                    ListEqualityComparer<T> toUse;
+                    if (StructuralEqualityComparer.Aggressive.Equals(comparer))
+                        toUse = ListEqualityComparer<T>.Aggressive;
+                    else
+                        toUse = ListEqualityComparer<T>.Default;
 
-                //    //IEqualityComparer toUse;
-                //    //if (StructuralEqualityComparer.Aggressive.Equals(comparer))
-                //    //    toUse = DictionaryEqualityComparer
+                    return toUse.GetHashCode(list);
+                }
 
-                //}
+                return comparer.GetHashCode(list);
             }
 
             // Custom collection type

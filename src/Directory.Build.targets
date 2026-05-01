@@ -5,5 +5,17 @@
     <!-- NOTE: We purposely fail the build if documentation is missing -->
     <DocumentationFile>bin\$(Configuration)\$(TargetFramework)\$(AssemblyName).xml</DocumentationFile>
   </PropertyGroup>
-  
+
+  <PropertyGroup Label="AOT Compatibility Features" Condition="'$(EnableAotStrict)' == 'true'">
+    <!-- Run only on modern .NET where the surface area is representative -->
+    <_IsModernDotNet>$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net8.0'))</_IsModernDotNet>
+    
+    <!-- Enable the analyzers -->
+    <EnableTrimAnalyzer Condition="'$(_IsModernDotNet)' == 'true'">true</EnableTrimAnalyzer>
+    <EnableAotAnalyzer Condition="'$(_IsModernDotNet)' == 'true'">true</EnableAotAnalyzer>
+
+    <!-- Force deep analysis -->
+    <PublishTrimmed Condition="'$(_IsModernDotNet)' == 'true'">true</PublishTrimmed>
+  </PropertyGroup>
+
 </Project>

@@ -1,4 +1,4 @@
-﻿#region Copyright 2019-2021 by Shad Storhaug, Licensed under the Apache License, Version 2.0
+﻿#region Copyright 2019-2026 by Shad Storhaug, Licensed under the Apache License, Version 2.0
 /*  Licensed to the Apache Software Foundation (ASF) under one or more
  *  contributor license agreements.  See the NOTICE file distributed with
  *  this work for additional information regarding copyright ownership.
@@ -22,6 +22,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 
 namespace J2N.Collections.ObjectModel
 {
@@ -77,7 +78,7 @@ namespace J2N.Collections.ObjectModel
         /// This constructor is an O(1) operation.
         /// </remarks>
         public ReadOnlySet(ISet<T> set)
-            : this(set, TIsValueTypeOrStringOrStructuralEquatable ? SetEqualityComparer<T>.Default : SetEqualityComparer<T>.Aggressive, StringFormatter.CurrentCulture)
+            : this(set, ChooseComparer(), StringFormatter.CurrentCulture)
         {
         }
 
@@ -92,6 +93,20 @@ namespace J2N.Collections.ObjectModel
             this.set = set;
             this.structuralEqualityComparer = structuralEqualityComparer;
             this.toStringFormatProvider = toStringFormatProvider;
+        }
+
+        [UnconditionalSuppressMessage("ReflectionAnalysis",
+            "IL3050",
+            Justification = "The call to Aggressive is guarded by a check for RuntimeFeature.IsDynamicCodeSupported.")]
+        private static SetEqualityComparer<T> ChooseComparer()
+        {
+            if (TIsValueTypeOrStringOrStructuralEquatable)
+                return SetEqualityComparer<T>.Default;
+
+            if (!RuntimeFeature.IsDynamicCodeSupported)
+                return SetEqualityComparer<T>.AggressiveNotSupported;
+
+            return SetEqualityComparer<T>.Aggressive;
         }
 
         /// <summary>
@@ -458,6 +473,7 @@ namespace J2N.Collections.ObjectModel
         /// <param name="comparer">The <see cref="IEqualityComparer"/> implementation to use to generate
         /// the hash code.</param>
         /// <returns>A hash code representing the current set.</returns>
+        /// <exception cref="ArgumentNullException">If <paramref name="comparer"/> is <c>null</c>.</exception>
         public virtual int GetHashCode(IEqualityComparer comparer)
             => SetEqualityComparer<T>.GetHashCode(set, comparer);
 

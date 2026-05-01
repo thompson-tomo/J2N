@@ -20,6 +20,8 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace J2N.Collections.Generic
 {
@@ -39,6 +41,7 @@ namespace J2N.Collections.Generic
         private static readonly bool TKeyIsObject = typeof(TKey).Equals(typeof(object));
         private static readonly bool TValueIsValueType = typeof(TValue).IsValueType;
         private static readonly bool TValueIsObject = typeof(TValue).Equals(typeof(object));
+        private static DictionaryEqualityComparer<TKey, TValue>? aggressive;
 
         private readonly StructuralEqualityComparer structuralEqualityComparer;
 
@@ -84,7 +87,20 @@ namespace J2N.Collections.Generic
         /// <see cref="ISet{T}"/>, or <see cref="IDictionary{TKey, TValue}"/>. All other types will
         /// be compared using <see cref="EqualityComparer{T}.Default"/>.
         /// </summary>
-        public static DictionaryEqualityComparer<TKey, TValue> Aggressive { get; } = new AggressiveDictionaryEqualityComparer();
+        public static DictionaryEqualityComparer<TKey, TValue> Aggressive
+        {
+            [RequiresDynamicCode("Aggressive structural comparison uses reflection.")]
+            get => LazyInitializer.EnsureInitialized(ref aggressive, () =>
+                RuntimeFeature.IsDynamicCodeSupported
+                    ? new AggressiveDictionaryEqualityComparer()
+                    : AggressiveNotSupported)!;
+        }
+
+        /// <summary>
+        /// Used as a fallback when aggressive mode is selected but the user doesn't have the ability to use Reflection (e.g. AOT trimming).
+        /// This comparer will throw a <see cref="PlatformNotSupportedException"/> when used.
+        /// </summary>
+        internal static DictionaryEqualityComparer<TKey, TValue> AggressiveNotSupported { get; } = new AggressiveModeUnsupportedDictionaryEqualityComparer();
 
 #pragma warning disable CS8618 // Non-nullable field is uninitialized. Consider declaring as nullable.
         internal DictionaryEqualityComparer(StructuralEqualityComparer structuralEqualityComparer)
@@ -96,6 +112,9 @@ namespace J2N.Collections.Generic
             LoadEqualityDelegates();
         }
 
+        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL3050",
+            Justification = "Delegates are loaded based on the StructuralEqualityComparer provided. " +
+                            "If Aggressive mode was selected, the user was already warned at the property level.")]
         private void LoadEqualityDelegates()
         {
             this.getKeyHashCode = StructuralEqualityUtil.LoadGetHashCodeDelegate<TKey>(TKeyIsValueType, TKeyIsObject, structuralEqualityComparer);
@@ -214,6 +233,10 @@ namespace J2N.Collections.Generic
         /// <param name="comparer">The comparer to convert to a <see cref="DictionaryEqualityComparer{TKey, TValue}"/>, if possible.</param>
         /// <param name="equalityComparer">The result <see cref="DictionaryEqualityComparer{TKey, TValue}"/> of the conversion.</param>
         /// <returns><c>true</c> if the conversion was successful; otherwise, <c>false</c>.</returns>
+        [UnconditionalSuppressMessage(
+            "ReflectionAnalysis",
+            "IL3050",
+            Justification = "Guarded by RuntimeFeature.IsDynamicCodeSupported. AOT users will hit the PlatformNotSupportedException instead of the Aggressive property.")]
         public static bool TryGetDictionaryEqualityComparer(IEqualityComparer comparer, [MaybeNullWhen(false)] out DictionaryEqualityComparer<TKey, TValue> equalityComparer)
         {
             // StructuralEqualityComparer is too "dumb" to resolve generic collections.
@@ -223,9 +246,20 @@ namespace J2N.Collections.Generic
             if (comparer is StructuralEqualityComparer seComparer)
             {
                 if (seComparer.Equals(StructuralEqualityComparer.Default))
+                {
                     equalityComparer = Default;
+                }
                 else
+                {
+                    if (!RuntimeFeature.IsDynamicCodeSupported)
+                    {
+                        ThrowHelper.ThrowPlatformNotSupportedException(ExceptionResource.PlatformNotSupported_NoAggressiveMode);
+                        equalityComparer = default;
+                        return false;
+                    }
+
                     equalityComparer = Aggressive;
+                }
                 return true;
             }
             else if (comparer is DictionaryEqualityComparer<TKey, TValue> dictionaryComparer)
@@ -314,7 +348,7 @@ namespace J2N.Collections.Generic
 #if FEATURE_SERIALIZABLE
         [Serializable]
 #endif
-        internal class DefaultDictionaryEqualityComparer : DictionaryEqualityComparer<TKey, TValue>
+        internal sealed class DefaultDictionaryEqualityComparer : DictionaryEqualityComparer<TKey, TValue>
         {
             public DefaultDictionaryEqualityComparer()
                 : base(StructuralEqualityComparer.Default)
@@ -324,11 +358,52 @@ namespace J2N.Collections.Generic
 #if FEATURE_SERIALIZABLE
         [Serializable]
 #endif
-        internal class AggressiveDictionaryEqualityComparer : DictionaryEqualityComparer<TKey, TValue>
+        internal sealed class AggressiveDictionaryEqualityComparer : DictionaryEqualityComparer<TKey, TValue>
         {
+            [RequiresDynamicCode("Aggressive structural comparison uses reflection.")]
             public AggressiveDictionaryEqualityComparer()
                 : base(StructuralEqualityComparer.Aggressive)
             { }
+        }
+
+        /// <summary>
+        /// AOT trimming is not happy with simply throwing an exception when aggressive mode is selected and the user
+        /// doesn't make that decision. The compiler wants a real comparer with no Reflection in it to be able to trim
+        /// the code properly. So, this comparer is used when aggressive mode is selected but the user doesn't have the
+        /// ability to use Reflection (e.g. AOT trimming).
+        /// </summary>
+#if FEATURE_SERIALIZABLE
+        [Serializable]
+#endif
+        internal sealed class AggressiveModeUnsupportedDictionaryEqualityComparer : DictionaryEqualityComparer<TKey, TValue>
+        {
+            public AggressiveModeUnsupportedDictionaryEqualityComparer()
+                : base(StructuralEqualityComparer.AggressiveNotSupported)
+            { }
+
+            public override bool Equals(IDictionary<TKey, TValue>? dictionaryA, IDictionary<TKey, TValue>? dictionaryB)
+            {
+                ThrowHelper.ThrowPlatformNotSupportedException(ExceptionResource.PlatformNotSupported_NoAggressiveMode);
+                return false;
+            }
+
+            public override bool Equals(object? obj)
+            {
+                ThrowHelper.ThrowPlatformNotSupportedException(ExceptionResource.PlatformNotSupported_NoAggressiveMode);
+                return false;
+            }
+
+            public override int GetHashCode(IDictionary<TKey, TValue>? dictionary)
+            {
+                ThrowHelper.ThrowPlatformNotSupportedException(ExceptionResource.PlatformNotSupported_NoAggressiveMode);
+                return 0;
+            }
+
+            public override int GetHashCode()
+            {
+                ThrowHelper.ThrowPlatformNotSupportedException(ExceptionResource.PlatformNotSupported_NoAggressiveMode);
+                return 0;
+            }
         }
     }
 

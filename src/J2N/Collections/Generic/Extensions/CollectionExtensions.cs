@@ -37,15 +37,43 @@ namespace J2N.Collections.Generic.Extensions
         /// <exception cref="ArgumentNullException"><paramref name="collection"/> is <c>null</c>.</exception>
         /// <remarks>
         /// To prevent any modifications to the <see cref="ICollection{T}"/> object, expose it only through this wrapper.
-        /// A <see cref="ReadOnlyCollection{T}"/> object does not expose methods that modify the collection. However, if
-        /// changes are made to the underlying <see cref="ICollection{T}"/> object, the read-only collection reflects those changes.
+        /// The returned object does not expose methods that modify the collection. However, if changes are made to the
+        /// underlying <see cref="ICollection{T}"/> object, the read-only collection reflects those changes.
         /// <para/>
         /// This method is an O(1) operation.
         /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static ICollection<T> AsReadOnly<T>(this ICollection<T> collection)
         {
+            if (collection is ISet<T> set)
+                return new ReadOnlySet<T>(set);
+            if (collection is IList<T> list)
+                return new ReadOnlyList<T>(list);
+
             return new ReadOnlyCollection<T>(collection);
+        }
+
+        /// <summary>
+        /// Returns a read-only <see cref="ICollection{T}"/> wrapper for the current dictionary.
+        /// </summary>
+        /// <typeparam name="TKey">The type of keys in the dictionary.</typeparam>
+        /// <typeparam name="TValue">The type of values in the dictionary.</typeparam>
+        /// <param name="collection">The dictionary to make read-only.</param>
+        /// <returns>An object that acts as a read-only wrapper around the current <see cref="ICollection{T}"/>.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="collection"/> is <c>null</c>.</exception>
+        /// <remarks>
+        /// To prevent any modifications to the <see cref="ICollection{T}"/> object, expose it only through this wrapper.
+        /// The returned object does not expose methods that modify the collection. However, if changes are made to the
+        /// underlying <see cref="ICollection{T}"/> object, the read-only collection reflects those changes.
+        /// <para/>
+        /// This method is an O(1) operation.
+        /// </remarks>
+        public static ICollection<KeyValuePair<TKey, TValue>> AsReadOnly<TKey, TValue>(this ICollection<KeyValuePair<TKey, TValue>> collection)
+        {
+           if (collection is IDictionary<TKey, TValue> dict)
+                return new ReadOnlyDictionary<TKey, TValue>(dict);
+
+            return new ReadOnlyCollection<KeyValuePair<TKey, TValue>>(collection);
         }
 
         /// <summary>

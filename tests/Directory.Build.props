@@ -4,5 +4,7 @@
   <PropertyGroup Label="Assembly Publishing">
     <IsPublishable>true</IsPublishable>
   </PropertyGroup>
-  
+
+  <Import Project="SkipBuild.props" Condition="'$(BuildGroup)' == 'LibrariesOnly'" />
+
 </Project>

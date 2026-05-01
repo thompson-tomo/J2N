@@ -20,6 +20,8 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace J2N.Collections.Generic
 {
@@ -36,6 +38,7 @@ namespace J2N.Collections.Generic
     {
         private static readonly bool TIsValueType = typeof(T).IsValueType;
         private static readonly bool TIsObject = typeof(T).Equals(typeof(object));
+        private static SetEqualityComparer<T>? aggressive;
 
         private readonly StructuralEqualityComparer structuralEqualityComparer;
 
@@ -76,7 +79,21 @@ namespace J2N.Collections.Generic
         /// <see cref="ISet{T}"/>, or <see cref="IDictionary{TKey, TValue}"/>. All other types will
         /// be compared using <see cref="EqualityComparer{T}.Default"/>.
         /// </summary>
-        public static SetEqualityComparer<T> Aggressive { get; } = new AggressiveSetEqualityComparer();
+        public static SetEqualityComparer<T> Aggressive
+        {
+            [RequiresDynamicCode("Aggressive structural comparison uses reflection.")]
+            get => LazyInitializer.EnsureInitialized(ref aggressive, () =>
+                RuntimeFeature.IsDynamicCodeSupported
+                    ? new AggressiveSetEqualityComparer()
+                    : AggressiveNotSupported)!;
+        }
+
+        /// <summary>
+        /// Used as a fallback when aggressive mode is selected but the user doesn't have the ability to use Reflection (e.g. AOT trimming).
+        /// This comparer will throw a <see cref="PlatformNotSupportedException"/> when used.
+        /// </summary>
+        internal static SetEqualityComparer<T> AggressiveNotSupported { get; } = new AggressiveModeUnsupportedSetEqualityComparer();
+
 
 #pragma warning disable CS8618 // Non-nullable field is uninitialized. Consider declaring as nullable.
         internal SetEqualityComparer(StructuralEqualityComparer structuralEqualityComparer)
@@ -88,6 +105,9 @@ namespace J2N.Collections.Generic
             LoadEqualityDelegates();
         }
 
+        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL3050",
+            Justification = "Delegates are loaded based on the StructuralEqualityComparer provided. " +
+                            "If Aggressive mode was selected, the user was already warned at the property level.")]
         private void LoadEqualityDelegates()
         {
             this.getHashCode = StructuralEqualityUtil.LoadGetHashCodeDelegate<T>(TIsValueType, TIsObject, structuralEqualityComparer);
@@ -198,6 +218,10 @@ namespace J2N.Collections.Generic
         /// <param name="comparer">The comparer to convert to a <see cref="SetEqualityComparer{T}"/>, if possible.</param>
         /// <param name="equalityComparer">The result <see cref="SetEqualityComparer{T}"/> of the conversion.</param>
         /// <returns><c>true</c> if the conversion was successful; otherwise, <c>false</c>.</returns>
+        [UnconditionalSuppressMessage(
+            "ReflectionAnalysis",
+            "IL3050",
+            Justification = "Guarded by RuntimeFeature.IsDynamicCodeSupported. AOT users will hit the PlatformNotSupportedException instead of the Aggressive property.")]
         public static bool TryGetSetEqualityComparer(IEqualityComparer comparer, [MaybeNullWhen(false)] out SetEqualityComparer<T> equalityComparer)
         {
             // StructuralEqualityComparer is too "dumb" to resolve generic collections.
@@ -207,9 +231,20 @@ namespace J2N.Collections.Generic
             if (comparer is StructuralEqualityComparer seComparer)
             {
                 if (seComparer.Equals(StructuralEqualityComparer.Default))
+                {
                     equalityComparer = Default;
+                }
                 else
+                {
+                    if (!RuntimeFeature.IsDynamicCodeSupported)
+                    {
+                        ThrowHelper.ThrowPlatformNotSupportedException(ExceptionResource.PlatformNotSupported_NoAggressiveMode);
+                        equalityComparer = default;
+                        return false;
+                    }
+
                     equalityComparer = Aggressive;
+                }
                 return true;
             }
             else if (comparer is SetEqualityComparer<T> setComparer)
@@ -287,7 +322,7 @@ namespace J2N.Collections.Generic
 #if FEATURE_SERIALIZABLE
         [Serializable]
 #endif
-        internal class DefaultSetEqualityComparer : SetEqualityComparer<T>
+        internal sealed class DefaultSetEqualityComparer : SetEqualityComparer<T>
         {
             public DefaultSetEqualityComparer()
                 : base(StructuralEqualityComparer.Default)
@@ -297,11 +332,52 @@ namespace J2N.Collections.Generic
 #if FEATURE_SERIALIZABLE
         [Serializable]
 #endif
-        internal class AggressiveSetEqualityComparer : SetEqualityComparer<T>
+        internal sealed class AggressiveSetEqualityComparer : SetEqualityComparer<T>
         {
+            [RequiresDynamicCode("Aggressive structural comparison uses reflection.")]
             public AggressiveSetEqualityComparer()
                 : base(StructuralEqualityComparer.Aggressive)
             { }
+        }
+
+        /// <summary>
+        /// AOT trimming is not happy with simply throwing an exception when aggressive mode is selected and the user
+        /// doesn't make that decision. The compiler wants a real comparer with no Reflection in it to be able to trim
+        /// the code properly. So, this comparer is used when aggressive mode is selected but the user doesn't have the
+        /// ability to use Reflection (e.g. AOT trimming).
+        /// </summary>
+#if FEATURE_SERIALIZABLE
+        [Serializable]
+#endif
+        internal sealed class AggressiveModeUnsupportedSetEqualityComparer : SetEqualityComparer<T>
+        {
+            public AggressiveModeUnsupportedSetEqualityComparer()
+                : base(StructuralEqualityComparer.AggressiveNotSupported)
+            { }
+
+            public override bool Equals(ISet<T>? setA, ISet<T>? setB)
+            {
+                ThrowHelper.ThrowPlatformNotSupportedException(ExceptionResource.PlatformNotSupported_NoAggressiveMode);
+                return false;
+            }
+
+            public override bool Equals(object? obj)
+            {
+                ThrowHelper.ThrowPlatformNotSupportedException(ExceptionResource.PlatformNotSupported_NoAggressiveMode);
+                return false;
+            }
+
+            public override int GetHashCode(ISet<T>? set)
+            {
+                ThrowHelper.ThrowPlatformNotSupportedException(ExceptionResource.PlatformNotSupported_NoAggressiveMode);
+                return 0;
+            }
+
+            public override int GetHashCode()
+            {
+                ThrowHelper.ThrowPlatformNotSupportedException(ExceptionResource.PlatformNotSupported_NoAggressiveMode);
+                return 0;
+            }
         }
     }
 }

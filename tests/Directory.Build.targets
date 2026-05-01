@@ -47,4 +47,6 @@
     <PackageReference Include="System.Runtime.Serialization.Formatters" Version="$(SystemRuntimeSerializationFormattersPackageReferenceVersion)" />
   </ItemGroup>
 
+  <Import Project="SkipBuild.targets" Condition="'$(BuildGroup)' == 'LibrariesOnly'" />
+
 </Project>

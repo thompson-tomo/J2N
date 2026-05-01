@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.Contracts;
+using System.Runtime.CompilerServices;
 
 namespace J2N.Collections.ObjectModel
 {
@@ -57,11 +58,7 @@ namespace J2N.Collections.ObjectModel
         /// <param name="dictionary">The dictionary to wrap.</param>
         /// <exception cref="ArgumentNullException"><paramref name="dictionary"/> is <c>null</c>.</exception>
         public ReadOnlyDictionary(IDictionary<TKey, TValue> dictionary)
-           : this(dictionary,
-                 TKeyIsValueTypeOrStringOrStructuralEquatable && TValueIsValueTypeOrStringOrStructuralEquatable ?
-                    DictionaryEqualityComparer<TKey, TValue>.Default :
-                    DictionaryEqualityComparer<TKey, TValue>.Aggressive,
-                 StringFormatter.CurrentCulture)
+           : this(dictionary, ChooseComparer(), StringFormatter.CurrentCulture)
         {
         }
 
@@ -76,6 +73,20 @@ namespace J2N.Collections.ObjectModel
             this.dictionary = dictionary;
             this.structuralEqualityComparer = structuralEqualityComparer;
             this.toStringFormatProvider = toStringFormatProvider;
+        }
+
+        [UnconditionalSuppressMessage("ReflectionAnalysis",
+            "IL3050",
+            Justification = "The call to Aggressive is guarded by a check for RuntimeFeature.IsDynamicCodeSupported.")]
+        private static DictionaryEqualityComparer<TKey, TValue> ChooseComparer()
+        {
+            if (TKeyIsValueTypeOrStringOrStructuralEquatable && TValueIsValueTypeOrStringOrStructuralEquatable)
+                return DictionaryEqualityComparer<TKey, TValue>.Default;
+
+            if (!RuntimeFeature.IsDynamicCodeSupported)
+                return DictionaryEqualityComparer<TKey, TValue>.AggressiveNotSupported;
+
+            return DictionaryEqualityComparer<TKey, TValue>.Aggressive;
         }
 
         /// <summary>
@@ -407,6 +418,7 @@ namespace J2N.Collections.ObjectModel
         /// <param name="comparer">The <see cref="IEqualityComparer"/> implementation to use to generate
         /// the hash code.</param>
         /// <returns>A hash code representing the current dictionary.</returns>
+        /// <exception cref="ArgumentNullException">If <paramref name="comparer"/> is <c>null</c>.</exception>
         public virtual int GetHashCode(IEqualityComparer comparer)
             => DictionaryEqualityComparer<TKey, TValue>.GetHashCode(dictionary, comparer);
 

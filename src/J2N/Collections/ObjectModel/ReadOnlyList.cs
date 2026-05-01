@@ -1,4 +1,4 @@
-﻿#region Copyright 2019-2021 by Shad Storhaug, Licensed under the Apache License, Version 2.0
+﻿#region Copyright 2019-2026 by Shad Storhaug, Licensed under the Apache License, Version 2.0
 /*  Licensed to the Apache Software Foundation (ASF) under one or more
  *  contributor license agreements.  See the NOTICE file distributed with
  *  this work for additional information regarding copyright ownership.
@@ -21,7 +21,8 @@ using J2N.Text;
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 
 
 namespace J2N.Collections.ObjectModel
@@ -64,7 +65,7 @@ namespace J2N.Collections.ObjectModel
         /// This constructor is an O(1) operation.
         /// </remarks>
         public ReadOnlyList(IList<T> list)
-            : this(list, TIsValueTypeOrStringOrStructuralEquatable ? ListEqualityComparer<T>.Default : ListEqualityComparer<T>.Aggressive, StringFormatter.CurrentCulture)
+            : this(list, ChooseComparer(), StringFormatter.CurrentCulture)
         {
         }
 
@@ -73,6 +74,20 @@ namespace J2N.Collections.ObjectModel
         {
             this.structuralEqualityComparer = structuralEqualityComparer ?? throw new ArgumentNullException(nameof(structuralEqualityComparer));
             this.toStringFormatProvider = toStringFormatProvider ?? throw new ArgumentNullException(nameof(toStringFormatProvider));
+        }
+
+        [UnconditionalSuppressMessage("ReflectionAnalysis",
+            "IL3050",
+            Justification = "The call to Aggressive is guarded by a check for RuntimeFeature.IsDynamicCodeSupported.")]
+        private static ListEqualityComparer<T> ChooseComparer()
+        {
+            if (TIsValueTypeOrStringOrStructuralEquatable)
+                return ListEqualityComparer<T>.Default;
+
+            if (!RuntimeFeature.IsDynamicCodeSupported)
+                return ListEqualityComparer<T>.AggressiveNotSupported;
+
+            return ListEqualityComparer<T>.Aggressive;
         }
 
         internal IList<T> List => base.Items; // for testing
@@ -99,6 +114,7 @@ namespace J2N.Collections.ObjectModel
         /// <param name="comparer">The <see cref="IEqualityComparer"/> implementation to use to generate
         /// the hash code.</param>
         /// <returns>A hash code representing the current list.</returns>
+        /// <exception cref="ArgumentNullException">If <paramref name="comparer"/> is <c>null</c>.</exception>
         public virtual int GetHashCode(IEqualityComparer comparer)
             => ListEqualityComparer<T>.GetHashCode(this, comparer);
 
